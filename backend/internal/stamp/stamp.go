@@ -2,11 +2,13 @@ package stamp
 
 import (
 	"bytes"
+	"embed"
+	"fmt"
 	"image"
 	"image/color"
-	"image/jpeg"
 	_ "image/gif"
-	_ "image/png"
+	"image/jpeg"
+	"image/png"
 	"io"
 
 	"github.com/disintegration/imageorient"
@@ -18,9 +20,12 @@ import (
 	"golang.org/x/image/webp"
 )
 
+//go:embed emoji/*.png
+var emojiFS embed.FS
+
 const maxEdge = 1600
 
-func Apply(r io.Reader, text string) ([]byte, error) {
+func Apply(r io.Reader, text, account string) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(r, 20<<20))
 	if err != nil {
 		return nil, err
@@ -30,7 +35,7 @@ func Apply(r io.Reader, text string) ([]byte, error) {
 		return nil, err
 	}
 	dst := fit(src, maxEdge)
-	if err := drawLabel(dst, text); err != nil {
+	if err := drawLabel(dst, text, account); err != nil {
 		return nil, err
 	}
 	var buf bytes.Buffer
@@ -72,41 +77,110 @@ func fit(src image.Image, edge int) *image.RGBA {
 	return dst
 }
 
-func drawLabel(dst *image.RGBA, text string) error {
+func drawLabel(dst *image.RGBA, text, account string) error {
 	ft, err := opentype.Parse(gobold.TTF)
 	if err != nil {
 		return err
 	}
-	size := float64(dst.Bounds().Dx()) / 8
-	if size < 42 {
-		size = 42
+	bounds := dst.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	size := float64(width) / 11
+	if size > 118 {
+		size = 118
 	}
-	if size > 150 {
-		size = 150
+	if size < 40 {
+		size = 40
 	}
-	face, err := opentype.NewFace(ft, &opentype.FaceOptions{
-		Size:    size,
-		DPI:     72,
-		Hinting: font.HintingFull,
-	})
+	padRight := width / 18
+	if padRight < 12 {
+		padRight = 12
+	}
+	mark, err := keycap(account)
 	if err != nil {
 		return err
 	}
-	if c, ok := face.(interface{ Close() error }); ok {
-		defer c.Close()
+	var face font.Face
+	var textWidth, box, gap, ascent, descent int
+	for {
+		if face != nil {
+			closeFace(face)
+		}
+		face, err = opentype.NewFace(ft, &opentype.FaceOptions{
+			Size:    size,
+			DPI:     72,
+			Hinting: font.HintingFull,
+		})
+		if err != nil {
+			return err
+		}
+		drawer := &font.Drawer{Face: face}
+		textWidth = drawer.MeasureString(text).Round()
+		metrics := face.Metrics()
+		ascent = metrics.Ascent.Round()
+		descent = metrics.Descent.Round()
+		box = 0
+		gap = 0
+		if mark != nil {
+			box = int(size * 0.95)
+			gap = int(size * 0.12)
+			if gap < 6 {
+				gap = 6
+			}
+		}
+		if textWidth+gap+box <= width-padRight*2 || size <= 42 {
+			break
+		}
+		size -= 4
 	}
-	d := &font.Drawer{
+	defer closeFace(face)
+
+	padTop := height / 14
+	if padTop < 12 {
+		padTop = 12
+	}
+	x := width - padRight - textWidth - gap - box
+	if x < 8 {
+		x = 8
+	}
+	y := padTop + ascent
+	if limit := height - descent - 8; y > limit {
+		y = limit
+	}
+	drawer := &font.Drawer{
 		Dst:  dst,
 		Src:  image.NewUniform(color.RGBA{R: 220, G: 38, B: 38, A: 255}),
 		Face: face,
 	}
-	width := d.MeasureString(text).Round()
-	metrics := face.Metrics()
-	ascent := metrics.Ascent.Round()
-	textHeight := ascent + metrics.Descent.Round()
-	x := (dst.Bounds().Dx() - width) / 2
-	y := (dst.Bounds().Dy()-textHeight)/2 + ascent
-	d.Dot = fixed.P(x, y)
-	d.DrawString(text)
+	drawer.Dot = fixed.P(x, y)
+	drawer.DrawString(text)
+	if mark != nil && box > 0 {
+		top := y - ascent + (ascent-box)/2
+		if top < 0 {
+			top = 0
+		}
+		left := x + textWidth + gap
+		draw.CatmullRom.Scale(dst, image.Rect(left, top, left+box, top+box), mark, mark.Bounds(), draw.Over, nil)
+	}
 	return nil
+}
+
+func keycap(account string) (image.Image, error) {
+	if account == "" {
+		return nil, nil
+	}
+	if len(account) != 1 || account[0] < '1' || account[0] > '9' {
+		return nil, fmt.Errorf("bad account")
+	}
+	file, err := emojiFS.Open("emoji/" + account + ".png")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return png.Decode(file)
+}
+
+func closeFace(face font.Face) {
+	if c, ok := face.(interface{ Close() error }); ok {
+		_ = c.Close()
+	}
 }

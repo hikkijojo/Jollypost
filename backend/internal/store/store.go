@@ -64,6 +64,17 @@ type Task struct {
 	Duplicate     bool      `json:"duplicate"`
 }
 
+type ReplyStat struct {
+	UserID    string `json:"userId"`
+	Name      string `json:"name"`
+	Submitted int    `json:"submitted"`
+}
+
+type ProofRef struct {
+	TaskID int64
+	UserID string
+}
+
 func Open(dsn string) (*Store, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -120,6 +131,70 @@ func (s *Store) migrate(ctx context.Context) error {
 			ALTER TABLE products
 			ADD CONSTRAINT fk_products_category
 			FOREIGN KEY (category_id) REFERENCES categories (id) ON DELETE SET NULL`); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS task_replies (
+		  task_id BIGINT NOT NULL,
+		  user_id VARCHAR(64) NOT NULL,
+		  user_name VARCHAR(128) NOT NULL DEFAULT '',
+		  reply_text VARCHAR(500) NOT NULL DEFAULT '',
+		  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+		  updated_at DATETIME NOT NULL,
+		  PRIMARY KEY (task_id, user_id),
+		  CONSTRAINT fk_task_replies_task FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`); err != nil {
+		return err
+	}
+	var proofUser int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'proofs' AND COLUMN_NAME = 'user_id'`).Scan(&proofUser); err != nil {
+		return err
+	}
+	if proofUser == 0 {
+		if _, err := s.db.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS proofs_user (
+			  task_id BIGINT NOT NULL,
+			  user_id VARCHAR(64) NOT NULL,
+			  created_at DATETIME NOT NULL,
+			  PRIMARY KEY (task_id, user_id),
+			  CONSTRAINT fk_proofs_user FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT IGNORE INTO proofs_user (task_id, user_id, created_at)
+			SELECT p.task_id, t.created_by, p.created_at
+			FROM proofs p
+			JOIN tasks t ON t.id = p.task_id`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, "RENAME TABLE proofs TO proofs_old, proofs_user TO proofs"); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS proofs_old"); err != nil {
+		return err
+	}
+	var split int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM app_meta WHERE k = 'reply_split'").Scan(&split); err != nil {
+		return err
+	}
+	if split == 0 {
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO task_replies (task_id, user_id, user_name, reply_text, status, updated_at)
+			SELECT t.id, t.created_by, t.created_by_name, t.reply_text,
+			       CASE WHEN p.task_id IS NULL THEN t.status ELSE 'submitted' END,
+			       t.updated_at
+			FROM tasks t
+			LEFT JOIN proofs p ON p.task_id = t.id AND p.user_id = t.created_by
+			WHERE t.status <> 'pending' OR t.reply_text <> '' OR p.task_id IS NOT NULL
+			ON DUPLICATE KEY UPDATE task_id = task_replies.task_id`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, "INSERT INTO app_meta (k, v) VALUES ('reply_split', '1')"); err != nil {
 			return err
 		}
 	}
@@ -488,14 +563,16 @@ func (s *Store) Import(ctx context.Context, items []parse.Item, userID, name str
 	return out, nil
 }
 
-func (s *Store) WeekTasks(ctx context.Context, start, end time.Time) ([]Task, error) {
+func (s *Store) WeekTasks(ctx context.Context, start, end time.Time, userID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.id, t.code, t.threads_url, t.product_text, t.product_id, t.reply_text, t.status,
+		SELECT t.id, t.code, t.threads_url, t.product_text, t.product_id,
+		       COALESCE(r.reply_text, ''), COALESCE(r.status, 'pending'),
 		       t.created_by, t.created_by_name, t.created_at, IF(p.task_id IS NULL, 0, 1)
 		FROM tasks t
-		LEFT JOIN proofs p ON p.task_id = t.id
+		LEFT JOIN task_replies r ON r.task_id = t.id AND r.user_id = ?
+		LEFT JOIN proofs p ON p.task_id = t.id AND p.user_id = ?
 		WHERE t.created_at >= ? AND t.created_at < ?
-		ORDER BY t.created_at, t.id`, start, end)
+		ORDER BY t.created_at, t.id`, userID, userID, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +591,53 @@ func (s *Store) WeekTasks(ctx context.Context, start, end time.Time) ([]Task, er
 	return tasks, rows.Err()
 }
 
-func (s *Store) SetTaskProduct(ctx context.Context, taskID, productID int64, now time.Time) (Task, error) {
+func (s *Store) WeekReplyStats(ctx context.Context, start, end time.Time) ([]ReplyStat, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.user_id, MAX(r.user_name), CAST(SUM(CASE WHEN r.status = 'submitted' THEN 1 ELSE 0 END) AS SIGNED)
+		FROM task_replies r
+		JOIN tasks t ON t.id = r.task_id
+		WHERE t.created_at >= ? AND t.created_at < ?
+		GROUP BY r.user_id
+		ORDER BY r.user_id`, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stats := []ReplyStat{}
+	for rows.Next() {
+		var stat ReplyStat
+		if err := rows.Scan(&stat.UserID, &stat.Name, &stat.Submitted); err != nil {
+			return nil, err
+		}
+		if stat.Name == "" {
+			stat.Name = stat.UserID
+		}
+		stats = append(stats, stat)
+	}
+	return stats, rows.Err()
+}
+
+func (s *Store) ListProofs(ctx context.Context) ([]ProofRef, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT task_id, user_id FROM proofs")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var refs []ProofRef
+	for rows.Next() {
+		var ref ProofRef
+		if err := rows.Scan(&ref.TaskID, &ref.UserID); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	if refs == nil {
+		refs = []ProofRef{}
+	}
+	return refs, rows.Err()
+}
+
+func (s *Store) SetTaskProduct(ctx context.Context, taskID, productID int64, userID string, now time.Time) (Task, error) {
 	var name string
 	var enabled int
 	err := s.db.QueryRowContext(ctx, "SELECT name, enabled FROM products WHERE id = ?", productID).Scan(&name, &enabled)
@@ -532,48 +655,53 @@ func (s *Store) SetTaskProduct(ctx context.Context, taskID, productID int64, now
 	if n == 0 {
 		return Task{}, sql.ErrNoRows
 	}
-	return s.taskByID(ctx, taskID)
+	return s.taskByID(ctx, taskID, userID)
 }
 
-func (s *Store) MarkCopied(ctx context.Context, taskID int64, reply string, now time.Time) (Task, error) {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE tasks
-		SET reply_text = ?, updated_at = ?,
-		    status = CASE WHEN status = 'submitted' THEN status ELSE 'copied' END
-		WHERE id = ?`, reply, now, taskID)
-	if err != nil {
+func (s *Store) MarkCopied(ctx context.Context, taskID int64, userID, userName, reply string, now time.Time) (Task, error) {
+	if err := s.requireTask(ctx, taskID); err != nil {
 		return Task{}, err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return Task{}, sql.ErrNoRows
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO task_replies (task_id, user_id, user_name, reply_text, status, updated_at)
+		VALUES (?, ?, ?, ?, 'copied', ?) AS new
+		ON DUPLICATE KEY UPDATE
+		  user_name = new.user_name,
+		  reply_text = new.reply_text,
+		  status = CASE WHEN task_replies.status = 'submitted' THEN task_replies.status ELSE 'copied' END,
+		  updated_at = new.updated_at`, taskID, userID, userName, reply, now); err != nil {
+		return Task{}, err
 	}
-	return s.taskByID(ctx, taskID)
+	return s.taskByID(ctx, taskID, userID)
 }
 
-func (s *Store) MarkSubmitted(ctx context.Context, taskID int64, now time.Time) (Task, error) {
+func (s *Store) MarkSubmitted(ctx context.Context, taskID int64, userID, userName string, now time.Time) (Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Task{}, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, "UPDATE tasks SET status = 'submitted', updated_at = ? WHERE id = ?", now, taskID)
-	if err != nil {
+	if err := s.requireTaskTx(ctx, tx, taskID); err != nil {
 		return Task{}, err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return Task{}, sql.ErrNoRows
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO task_replies (task_id, user_id, user_name, reply_text, status, updated_at)
+		VALUES (?, ?, ?, '', 'submitted', ?) AS new
+		ON DUPLICATE KEY UPDATE
+		  user_name = new.user_name,
+		  status = 'submitted',
+		  updated_at = new.updated_at`, taskID, userID, userName, now); err != nil {
+		return Task{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO proofs (task_id, created_at) VALUES (?, ?) AS new
-		ON DUPLICATE KEY UPDATE created_at = new.created_at`, taskID, now); err != nil {
+		INSERT INTO proofs (task_id, user_id, created_at) VALUES (?, ?, ?) AS new
+		ON DUPLICATE KEY UPDATE created_at = new.created_at`, taskID, userID, now); err != nil {
 		return Task{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Task{}, err
 	}
-	return s.taskByID(ctx, taskID)
+	return s.taskByID(ctx, taskID, userID)
 }
 
 func (s *Store) TaskCode(ctx context.Context, id int64) (string, error) {
@@ -594,13 +722,30 @@ func (s *Store) DeleteTask(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *Store) taskByID(ctx context.Context, id int64) (Task, error) {
+func (s *Store) requireTask(ctx context.Context, id int64) error {
+	return s.requireTaskTx(ctx, s.db, id)
+}
+
+func (s *Store) requireTaskTx(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, id int64) error {
+	var found int64
+	err := q.QueryRowContext(ctx, "SELECT id FROM tasks WHERE id = ?", id).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sql.ErrNoRows
+	}
+	return err
+}
+
+func (s *Store) taskByID(ctx context.Context, id int64, userID string) (Task, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT t.id, t.code, t.threads_url, t.product_text, t.product_id, t.reply_text, t.status,
+		SELECT t.id, t.code, t.threads_url, t.product_text, t.product_id,
+		       COALESCE(r.reply_text, ''), COALESCE(r.status, 'pending'),
 		       t.created_by, t.created_by_name, t.created_at, IF(p.task_id IS NULL, 0, 1)
 		FROM tasks t
-		LEFT JOIN proofs p ON p.task_id = t.id
-		WHERE t.id = ?`, id)
+		LEFT JOIN task_replies r ON r.task_id = t.id AND r.user_id = ?
+		LEFT JOIN proofs p ON p.task_id = t.id AND p.user_id = ?
+		WHERE t.id = ?`, userID, userID, id)
 	task, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, sql.ErrNoRows
@@ -717,6 +862,49 @@ func seqNo(ctx context.Context, tx *sql.Tx, day string) (int, bool, error) {
 		return 0, false, err
 	}
 	return n, true, nil
+}
+
+type ThreadCard struct {
+	Author   string
+	Body     string
+	HasImage bool
+}
+
+func (s *Store) TaskThreadsURL(ctx context.Context, id int64) (string, error) {
+	var raw string
+	err := s.db.QueryRowContext(ctx, "SELECT threads_url FROM tasks WHERE id = ?", id).Scan(&raw)
+	return raw, err
+}
+
+func (s *Store) GetThreadPreview(ctx context.Context, hash string) (ThreadCard, time.Time, bool, error) {
+	var card ThreadCard
+	var has int
+	var at time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT author, body, has_image, fetched_at FROM thread_previews WHERE url_hash = ?`, hash).
+		Scan(&card.Author, &card.Body, &has, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ThreadCard{}, time.Time{}, false, nil
+	}
+	if err != nil {
+		return ThreadCard{}, time.Time{}, false, err
+	}
+	card.HasImage = has == 1
+	return card, at, true, nil
+}
+
+func (s *Store) SaveThreadPreview(ctx context.Context, hash, author, body string, hasImage bool, at time.Time) error {
+	flag := 0
+	if hasImage {
+		flag = 1
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO thread_previews (url_hash, author, body, has_image, fetched_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+		  author = VALUES(author), body = VALUES(body), has_image = VALUES(has_image), fetched_at = VALUES(fetched_at)`,
+		hash, trimRunes(author, 120), trimRunes(body, 500), flag, at)
+	return err
 }
 
 func isDup(err error) bool {

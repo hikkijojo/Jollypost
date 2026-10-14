@@ -56,6 +56,9 @@ func main() {
 		Config: cfg,
 		Client: &http.Client{Timeout: 12 * time.Second},
 	}
+	if err := app.MigrateProofFiles(ctx); err != nil {
+		log.Fatalf("proofs: %v", err)
+	}
 	mux := http.NewServeMux()
 	app.Routes(mux)
 	srv := &http.Server{

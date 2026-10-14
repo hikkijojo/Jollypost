@@ -1,10 +1,15 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
 	"io/fs"
 	"log"
@@ -16,22 +21,37 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/image/draw"
+	"golang.org/x/image/webp"
+
 	"jingfeng/backend/internal/config"
 	"jingfeng/backend/internal/httpx"
 	"jingfeng/backend/internal/line"
 	"jingfeng/backend/internal/parse"
 	"jingfeng/backend/internal/stamp"
 	"jingfeng/backend/internal/store"
+	"jingfeng/backend/internal/threads"
 	"jingfeng/backend/internal/webui"
 	"jingfeng/backend/internal/week"
+
+	_ "image/gif"
+	_ "image/png"
 )
 
 type App struct {
-	Store     *store.Store
-	Config    config.Config
-	Client    *http.Client
-	mu        sync.Mutex
-	tokenCache map[string]cachedProfile
+	Store          *store.Store
+	Config         config.Config
+	Client         *http.Client
+	mu             sync.Mutex
+	tokenCache     map[string]cachedProfile
+	previewMu      sync.Mutex
+	previewFlights map[string]*previewCall
+}
+
+type previewCall struct {
+	wg   sync.WaitGroup
+	card store.ThreadCard
+	err  error
 }
 
 type User struct {
@@ -64,6 +84,8 @@ func (a *App) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/tasks/{id}/copy", a.withUser(a.copyTask))
 	mux.Handle("POST /api/tasks/{id}/proof", a.withUser(a.uploadProof))
 	mux.Handle("GET /api/tasks/{id}/proof", a.withUser(a.getProof))
+	mux.Handle("GET /api/tasks/{id}/thread", a.withUser(a.threadPreview))
+	mux.Handle("GET /api/tasks/{id}/thread-image", a.withUser(a.threadImage))
 }
 
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
@@ -238,60 +260,77 @@ func (a *App) weekTasks(w http.ResponseWriter, r *http.Request, user User) {
 	if raw := r.URL.Query().Get("week"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil {
-			httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "週次不正確")
+			httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "月份不正確")
 			return
 		}
 		offset = n
 	}
-	if offset > 52 {
-		offset = 52
+	if offset > 0 {
+		offset = 0
 	}
-	if offset < -52 {
-		offset = -52
+	if offset < -36 {
+		offset = -36
 	}
 	start, end, label := week.Range(time.Now(), offset)
-	tasks, err := a.Store.WeekTasks(r.Context(), start, end)
+	tasks, err := a.Store.WeekTasks(r.Context(), start, end, user.ID)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
-	submitted := 0
+	stats, err := a.Store.WeekReplyStats(r.Context(), start, end)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
 	type person struct {
 		Name      string `json:"name"`
 		UserID    string `json:"userId"`
 		Total     int    `json:"total"`
 		Submitted int    `json:"submitted"`
 	}
-	order := []string{}
-	byID := map[string]*person{}
-	for _, task := range tasks {
-		if task.Status == "submitted" {
-			submitted++
+	people := make([]person, 0, len(stats)+1)
+	mine := 0
+	seenMe := false
+	for _, stat := range stats {
+		if stat.UserID == user.ID {
+			mine = stat.Submitted
+			seenMe = true
+			people = append([]person{{
+				Name:      user.Name,
+				UserID:    user.ID,
+				Total:     len(tasks),
+				Submitted: stat.Submitted,
+			}}, people...)
+			continue
 		}
-		item, ok := byID[task.CreatedBy]
-		if !ok {
-			name := task.CreatedByName
-			if name == "" {
-				name = task.CreatedBy
-			}
-			item = &person{Name: name, UserID: task.CreatedBy}
-			byID[task.CreatedBy] = item
-			order = append(order, task.CreatedBy)
+		name := stat.Name
+		if name == "" {
+			name = stat.UserID
 		}
-		item.Total++
-		if task.Status == "submitted" {
-			item.Submitted++
-		}
+		people = append(people, person{
+			Name:      name,
+			UserID:    stat.UserID,
+			Total:     len(tasks),
+			Submitted: stat.Submitted,
+		})
 	}
-	people := make([]person, 0, len(order))
-	for _, id := range order {
-		people = append(people, *byID[id])
+	if !seenMe {
+		name := user.Name
+		if name == "" {
+			name = user.ID
+		}
+		people = append([]person{{
+			Name:      name,
+			UserID:    user.ID,
+			Total:     len(tasks),
+			Submitted: 0,
+		}}, people...)
 	}
 	httpx.WriteOK(w, http.StatusOK, map[string]any{
 		"week":      offset,
 		"label":     label,
 		"total":     len(tasks),
-		"submitted": submitted,
+		"submitted": mine,
 		"byUser":    people,
 		"tasks":     tasks,
 	})
@@ -313,7 +352,7 @@ func (a *App) patchTask(w http.ResponseWriter, r *http.Request, user User) {
 		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "請選擇產品")
 		return
 	}
-	task, err := a.Store.SetTaskProduct(r.Context(), id, req.ProductID, time.Now())
+	task, err := a.Store.SetTaskProduct(r.Context(), id, req.ProductID, user.ID, time.Now())
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -338,7 +377,7 @@ func (a *App) copyTask(w http.ResponseWriter, r *http.Request, user User) {
 		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "回文不能是空的，而且最多 500 字")
 		return
 	}
-	task, err := a.Store.MarkCopied(r.Context(), id, reply, time.Now())
+	task, err := a.Store.MarkCopied(r.Context(), id, user.ID, user.Name, reply, time.Now())
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -355,7 +394,7 @@ func (a *App) deleteTask(w http.ResponseWriter, r *http.Request, user User) {
 		writeStoreErr(w, err)
 		return
 	}
-	_ = os.Remove(a.proofPath(id))
+	a.removeProofFiles(id)
 	httpx.WriteOK(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
@@ -374,13 +413,18 @@ func (a *App) uploadProof(w http.ResponseWriter, r *http.Request, user User) {
 		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "圖片太大或格式不對，請控制在 20MB 以內")
 		return
 	}
+	account := strings.TrimSpace(r.FormValue("account"))
+	if account != "" && (len(account) != 1 || account[0] < '1' || account[0] > '9') {
+		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "請選擇第幾個分身")
+		return
+	}
 	file, _, err := r.FormFile("file")
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "請選擇截圖")
 		return
 	}
 	defer file.Close()
-	stamped, err := stamp.Apply(file, code)
+	stamped, err := stamp.Apply(file, code, account)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "這張圖沒辦法讀取，請換 jpg 或 png")
 		return
@@ -389,7 +433,11 @@ func (a *App) uploadProof(w http.ResponseWriter, r *http.Request, user User) {
 		writeStoreErr(w, err)
 		return
 	}
-	path := a.proofPath(id)
+	path, err := a.proofPath(id, user.ID)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "這個帳號無法儲存截圖")
+		return
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, stamped, 0o644); err != nil {
 		writeStoreErr(w, err)
@@ -400,7 +448,7 @@ func (a *App) uploadProof(w http.ResponseWriter, r *http.Request, user User) {
 		writeStoreErr(w, err)
 		return
 	}
-	task, err := a.Store.MarkSubmitted(r.Context(), id, time.Now())
+	task, err := a.Store.MarkSubmitted(r.Context(), id, user.ID, user.Name, time.Now())
 	if err != nil {
 		_ = os.Remove(path)
 		writeStoreErr(w, err)
@@ -414,7 +462,11 @@ func (a *App) getProof(w http.ResponseWriter, r *http.Request, user User) {
 	if !ok {
 		return
 	}
-	path := a.proofPath(id)
+	path, err := a.proofPath(id, user.ID)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "這個帳號無法讀取截圖")
+		return
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "還沒有截圖")
@@ -426,8 +478,219 @@ func (a *App) getProof(w http.ResponseWriter, r *http.Request, user User) {
 	_, _ = io.Copy(w, f)
 }
 
-func (a *App) proofPath(id int64) string {
-	return filepath.Join(a.Config.UploadDir, fmt.Sprintf("%d.jpg", id))
+func (a *App) threadPreview(w http.ResponseWriter, r *http.Request, _ User) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	raw, err := a.Store.TaskThreadsURL(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "找不到這則任務")
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "DB", "讀不到任務")
+		return
+	}
+	card, err := a.ensurePreview(r.Context(), raw)
+	if err != nil {
+		log.Printf("thread preview: %v", err)
+		httpx.WriteError(w, http.StatusBadGateway, "THREADS", "暫時讀不到這則貼文")
+		return
+	}
+	httpx.WriteOK(w, http.StatusOK, map[string]any{
+		"author":   card.Author,
+		"body":     card.Body,
+		"hasImage": card.HasImage,
+	})
+}
+
+func (a *App) threadImage(w http.ResponseWriter, r *http.Request, _ User) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	raw, err := a.Store.TaskThreadsURL(r.Context(), id)
+	if err != nil {
+		httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "找不到這則貼文圖")
+		return
+	}
+	sum := sha256.Sum256([]byte(raw))
+	hash := hex.EncodeToString(sum[:])
+	card, _, found, err := a.Store.GetThreadPreview(r.Context(), hash)
+	if err != nil || !found || !card.HasImage {
+		httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "還沒有貼文圖")
+		return
+	}
+	path, err := a.previewPath(hash)
+	if err != nil {
+		httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "還沒有貼文圖")
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "還沒有貼文圖")
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	_, _ = io.Copy(w, f)
+}
+
+func (a *App) ensurePreview(ctx context.Context, raw string) (store.ThreadCard, error) {
+	sum := sha256.Sum256([]byte(raw))
+	hash := hex.EncodeToString(sum[:])
+	card, fetched, found, err := a.Store.GetThreadPreview(ctx, hash)
+	if err != nil {
+		return store.ThreadCard{}, err
+	}
+	if found && (card.Body != "" || time.Since(fetched) < 15*time.Minute) {
+		return card, nil
+	}
+	return a.fetchPreview(ctx, hash, raw)
+}
+
+func (a *App) fetchPreview(ctx context.Context, hash, raw string) (store.ThreadCard, error) {
+	a.previewMu.Lock()
+	if a.previewFlights == nil {
+		a.previewFlights = map[string]*previewCall{}
+	}
+	if call, exists := a.previewFlights[hash]; exists {
+		a.previewMu.Unlock()
+		call.wg.Wait()
+		return call.card, call.err
+	}
+	call := &previewCall{}
+	call.wg.Add(1)
+	a.previewFlights[hash] = call
+	a.previewMu.Unlock()
+	defer func() {
+		a.previewMu.Lock()
+		delete(a.previewFlights, hash)
+		a.previewMu.Unlock()
+		call.wg.Done()
+	}()
+
+	preview, err := threads.Fetch(ctx, raw)
+	if err != nil {
+		log.Printf("thread fetch: %v", err)
+		_ = a.Store.SaveThreadPreview(ctx, hash, "", "", false, time.Now())
+		return store.ThreadCard{}, nil
+	}
+	hasImage := false
+	if len(preview.Image) > 0 {
+		if jpg, err := toJPEG(preview.Image); err == nil {
+			if path, err := a.previewPath(hash); err == nil {
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil && os.WriteFile(path, jpg, 0o644) == nil {
+					hasImage = true
+				}
+			}
+		}
+	}
+	card := store.ThreadCard{Author: preview.Author, Body: preview.Body, HasImage: hasImage}
+	if err := a.Store.SaveThreadPreview(ctx, hash, card.Author, card.Body, hasImage, time.Now()); err != nil {
+		call.err = err
+		call.card = card
+		return card, err
+	}
+	call.card = card
+	return card, nil
+}
+
+func (a *App) previewPath(hash string) (string, error) {
+	if len(hash) != 64 {
+		return "", fmt.Errorf("bad hash")
+	}
+	for _, c := range hash {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return "", fmt.Errorf("bad hash")
+		}
+	}
+	return filepath.Join(a.Config.UploadDir, "previews", hash+".jpg"), nil
+}
+
+func toJPEG(raw []byte) ([]byte, error) {
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		img, err = webp.Decode(bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+	}
+	bounds := img.Bounds()
+	edge := bounds.Dx()
+	if bounds.Dy() > edge {
+		edge = bounds.Dy()
+	}
+	if edge > 480 && edge > 0 {
+		scale := 480.0 / float64(edge)
+		dst := image.NewRGBA(image.Rect(0, 0, int(float64(bounds.Dx())*scale), int(float64(bounds.Dy())*scale)))
+		draw.CatmullRom.Scale(dst, dst.Bounds(), img, bounds, draw.Over, nil)
+		img = dst
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (a *App) proofPath(taskID int64, userID string) (string, error) {
+	if !safeUserID(userID) {
+		return "", fmt.Errorf("unsafe user id")
+	}
+	return filepath.Join(a.Config.UploadDir, fmt.Sprintf("%d_%s.jpg", taskID, userID)), nil
+}
+
+func (a *App) removeProofFiles(taskID int64) {
+	dir := a.Config.UploadDir
+	_ = os.Remove(filepath.Join(dir, fmt.Sprintf("%d.jpg", taskID)))
+	matches, _ := filepath.Glob(filepath.Join(dir, fmt.Sprintf("%d_*.jpg", taskID)))
+	for _, match := range matches {
+		_ = os.Remove(match)
+	}
+}
+
+func (a *App) MigrateProofFiles(ctx context.Context) error {
+	refs, err := a.Store.ListProofs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		next, err := a.proofPath(ref.TaskID, ref.UserID)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(next); err == nil {
+			continue
+		}
+		old := filepath.Join(a.Config.UploadDir, fmt.Sprintf("%d.jpg", ref.TaskID))
+		if _, err := os.Stat(old); err != nil {
+			continue
+		}
+		if err := os.Rename(old, next); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func safeUserID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (a *App) withUser(next func(http.ResponseWriter, *http.Request, User)) http.Handler {
@@ -465,7 +728,7 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request, adminOnly bool) 
 	profile, err := a.profile(r.Context(), token)
 	if err != nil {
 		log.Printf("liff verify: %v", err)
-		httpx.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "LINE 登入無效，請重新開啟")
+		httpx.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "LINE 登入已失效，請重新登入")
 		return User{}, false
 	}
 	lists := config.CurrentLists(a.Config.EnvFile)

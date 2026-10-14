@@ -45,6 +45,13 @@ func VerifyIDToken(ctx context.Context, client *http.Client, idToken, channelID 
 		return Profile{}, err
 	}
 	if resp.StatusCode >= 300 {
+		var lineErr struct {
+			Description string `json:"error_description"`
+		}
+		_ = json.Unmarshal(payload, &lineErr)
+		if lineErr.Description != "" {
+			return Profile{}, fmt.Errorf("line verify status %d: %s", resp.StatusCode, lineErr.Description)
+		}
 		return Profile{}, fmt.Errorf("line verify status %d", resp.StatusCode)
 	}
 	var body struct {

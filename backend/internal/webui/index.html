@@ -4,23 +4,41 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
-  <title>發文小幫手</title>
+  <title>PO文小多比</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body data-liff-id="__LIFF_ID__">
   <header>
     <div>
       <p class="brand">璟豐</p>
-      <h1>發文小幫手</h1>
+      <h1>PO文小多比</h1>
     </div>
     <p id="who"></p>
   </header>
+  <main id="app"><p class="muted">登入中…</p></main>
   <nav id="tabs" hidden>
+    <button type="button" data-tab="week">當月</button>
     <button type="button" data-tab="inbox">收任務</button>
-    <button type="button" data-tab="week">本週</button>
     <button type="button" data-tab="products" hidden>話術</button>
   </nav>
-  <main id="app"><p class="muted">登入中…</p></main>
+  <div id="account" hidden>
+    <div class="account-box">
+      <p>第幾個分身？</p>
+      <div class="account-grid">
+        <button type="button" data-account="1">1️⃣</button>
+        <button type="button" data-account="2">2️⃣</button>
+        <button type="button" data-account="3">3️⃣</button>
+        <button type="button" data-account="4">4️⃣</button>
+        <button type="button" data-account="5">5️⃣</button>
+        <button type="button" data-account="6">6️⃣</button>
+        <button type="button" data-account="7">7️⃣</button>
+        <button type="button" data-account="8">8️⃣</button>
+        <button type="button" data-account="9">9️⃣</button>
+      </div>
+      <button type="button" class="ghost account-none" data-account="">無分身</button>
+      <button type="button" class="ghost" id="account-cancel">取消</button>
+    </div>
+  </div>
   <div id="busy" hidden>
     <div class="busy-box">
       <div class="spinner" aria-hidden="true"></div>

@@ -19,7 +19,7 @@ func TestApplyWritesRed(t *testing.T) {
 	if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: 80}); err != nil {
 		t.Fatal(err)
 	}
-	out, err := Apply(bytes.NewReader(buf.Bytes()), "10/14-1")
+	out, err := Apply(bytes.NewReader(buf.Bytes()), "10/8-1", "7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,17 +27,51 @@ func TestApplyWritesRed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cx, cy := img.Bounds().Dx()/2, img.Bounds().Dy()/2
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
 	found := false
-	for y := cy - 50; y <= cy+50; y++ {
-		for x := cx - 120; x <= cx+120; x++ {
-			r, g, b, _ := img.At(x, y).RGBA()
-			if r>>8 > 150 && g>>8 < 120 && b>>8 < 120 {
+	for y := 0; y < h/3; y++ {
+		for x := w / 2; x < w; x++ {
+			if isRed(img.At(x, y)) {
 				found = true
 			}
 		}
 	}
 	if !found {
-		t.Fatal("stamp color not found near center")
+		t.Fatal("stamp color not found in the upper right")
 	}
+	if isRed(img.At(w/2, h/2)) {
+		t.Fatal("stamp still covers the middle")
+	}
+	if !hasKeycapBlue(img) {
+		t.Fatal("keycap emoji not found in the upper right")
+	}
+	plain, err := Apply(bytes.NewReader(buf.Bytes()), "10/8-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainImg, err := jpeg.Decode(bytes.NewReader(plain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasKeycapBlue(plainImg) {
+		t.Fatal("empty account still drew a keycap")
+	}
+}
+
+func hasKeycapBlue(img image.Image) bool {
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	for y := 0; y < h/3; y++ {
+		for x := w / 2; x < w; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			if b>>8 > 150 && r>>8 < 80 && g>>8 > 90 && g>>8 < 190 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isRed(c color.Color) bool {
+	r, g, b, _ := c.RGBA()
+	return r>>8 > 150 && g>>8 < 120 && b>>8 < 120
 }
