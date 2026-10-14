@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,6 +78,9 @@ func (a *App) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/products", a.withAdmin(a.createProduct))
 	mux.Handle("PUT /api/products/{id}", a.withAdmin(a.updateProduct))
 	mux.Handle("DELETE /api/products/{id}", a.withAdmin(a.deleteProduct))
+	mux.Handle("GET /api/members", a.withAdmin(a.listMembers))
+	mux.Handle("POST /api/members", a.withAdmin(a.addMember))
+	mux.Handle("DELETE /api/members/{userId}", a.withAdmin(a.deleteMember))
 	mux.Handle("POST /api/tasks/import", a.withUser(a.importTasks))
 	mux.Handle("GET /api/tasks", a.withUser(a.weekTasks))
 	mux.Handle("PATCH /api/tasks/{id}", a.withUser(a.patchTask))
@@ -731,21 +735,119 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request, adminOnly bool) 
 		httpx.WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "LINE 登入已失效，請重新登入")
 		return User{}, false
 	}
-	lists := config.CurrentLists(a.Config.EnvFile)
-	if _, ok := lists.Allowed[profile.UserID]; !ok {
+	_, isAdmin := config.CurrentAdmins(a.Config.EnvFile)[profile.UserID]
+	member := false
+	if !isAdmin {
+		var err error
+		member, err = a.Store.IsMember(r.Context(), profile.UserID)
+		if err != nil {
+			writeStoreErr(w, err)
+			return User{}, false
+		}
+	}
+	if !isAdmin && !member {
 		httpx.WriteForbidden(w, profile.UserID, profile.Name)
 		return User{}, false
 	}
-	_, isAdmin := lists.Admin[profile.UserID]
 	if adminOnly && !isAdmin {
-		httpx.WriteError(w, http.StatusForbidden, "FORBIDDEN", "只有管理員可以改話術")
+		httpx.WriteError(w, http.StatusForbidden, "FORBIDDEN", "只有管理者可以做這件事")
 		return User{}, false
+	}
+	if profile.Name != "" {
+		if err := a.Store.SaveProfile(r.Context(), profile.UserID, profile.Name, time.Now()); err != nil {
+			log.Printf("profile: %v", err)
+		}
+	}
+	if member && profile.Name != "" {
+		if err := a.Store.TouchMemberName(r.Context(), profile.UserID, profile.Name); err != nil {
+			log.Printf("member name: %v", err)
+		}
 	}
 	name := profile.Name
 	if name == "" {
 		name = profile.UserID
 	}
 	return User{ID: profile.UserID, Name: name, Admin: isAdmin}, true
+}
+
+func (a *App) listMembers(w http.ResponseWriter, r *http.Request, _ User) {
+	members, err := a.Store.ListMembers(r.Context())
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	admins := config.CurrentAdmins(a.Config.EnvFile)
+	ids := make([]string, 0, len(admins))
+	for id := range admins {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	names, err := a.Store.ProfileNames(r.Context(), ids)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	type person struct {
+		UserID      string `json:"userId"`
+		DisplayName string `json:"displayName"`
+	}
+	adminRows := make([]person, 0, len(ids))
+	for _, id := range ids {
+		adminRows = append(adminRows, person{UserID: id, DisplayName: names[id]})
+	}
+	regular := make([]store.Member, 0, len(members))
+	for _, item := range members {
+		if _, ok := admins[item.UserID]; ok {
+			continue
+		}
+		regular = append(regular, item)
+	}
+	httpx.WriteOK(w, http.StatusOK, map[string]any{
+		"admins":  adminRows,
+		"members": regular,
+	})
+}
+
+func (a *App) addMember(w http.ResponseWriter, r *http.Request, _ User) {
+	var req struct {
+		UserID      string `json:"userId"`
+		DisplayName string `json:"displayName"`
+	}
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_JSON", "請求格式錯誤")
+		return
+	}
+	userID := strings.TrimSpace(req.UserID)
+	if !safeUserID(userID) {
+		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "userId 格式不對")
+		return
+	}
+	if _, ok := config.CurrentAdmins(a.Config.EnvFile)[userID]; ok {
+		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "這組是管理者，不用加入一般名單")
+		return
+	}
+	if err := a.Store.AddMember(r.Context(), userID, req.DisplayName, time.Now()); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	httpx.WriteOK(w, http.StatusCreated, map[string]string{"userId": userID})
+}
+
+func (a *App) deleteMember(w http.ResponseWriter, r *http.Request, _ User) {
+	userID := strings.TrimSpace(r.PathValue("userId"))
+	if !safeUserID(userID) {
+		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "userId 格式不對")
+		return
+	}
+	if _, ok := config.CurrentAdmins(a.Config.EnvFile)[userID]; ok {
+		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "管理者要從伺服器設定移除")
+		return
+	}
+	if err := a.Store.DeleteMember(r.Context(), userID); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	httpx.WriteOK(w, http.StatusOK, map[string]string{"userId": userID})
 }
 
 func (a *App) profile(ctx context.Context, token string) (line.Profile, error) {

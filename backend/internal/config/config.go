@@ -60,6 +60,14 @@ var listCache struct {
 	lists Lists
 }
 
+func CurrentAdmins(envFile string) map[string]struct{} {
+	return CurrentLists(envFile).Admin
+}
+
+func LegacyAllowed(envFile string) map[string]struct{} {
+	return CurrentLists(envFile).Allowed
+}
+
 func CurrentLists(envFile string) Lists {
 	listCache.Lock()
 	defer listCache.Unlock()

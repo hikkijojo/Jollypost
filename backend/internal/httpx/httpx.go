@@ -27,7 +27,7 @@ func WriteForbidden(w http.ResponseWriter, userID, name string) {
 		"displayName": name,
 		"error": map[string]string{
 			"code":    "FORBIDDEN",
-			"message": "這個 LINE 帳號還沒有加入白名單",
+			"message": "這個 LINE 帳號還沒加入",
 		},
 	})
 }

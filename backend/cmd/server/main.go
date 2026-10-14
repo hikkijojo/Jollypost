@@ -46,6 +46,9 @@ func main() {
 	if err := st.Seed(ctx, time.Now()); err != nil {
 		log.Fatalf("seed: %v", err)
 	}
+	if err := st.ImportMembersOnce(ctx, regularUserIDs(cfg.EnvFile), time.Now()); err != nil {
+		log.Fatalf("members: %v", err)
+	}
 	if err := os.MkdirAll(cfg.UploadDir, 0o755); err != nil {
 		log.Fatalf("uploads: %v", err)
 	}
@@ -70,4 +73,17 @@ func main() {
 	}
 	log.Printf("listening on %s", srv.Addr)
 	log.Fatal(srv.ListenAndServe())
+}
+
+func regularUserIDs(envFile string) []string {
+	allowed := config.LegacyAllowed(envFile)
+	admins := config.CurrentAdmins(envFile)
+	ids := make([]string, 0, len(allowed))
+	for id := range allowed {
+		if _, ok := admins[id]; ok {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }

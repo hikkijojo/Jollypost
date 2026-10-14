@@ -2,50 +2,84 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3eee6">
+  <meta name="color-scheme" content="light">
   <meta name="robots" content="noindex">
   <title>PO文小多比</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body data-liff-id="__LIFF_ID__">
   <header>
-    <div>
-      <p class="brand">璟豐</p>
-      <h1>PO文小多比</h1>
+    <div class="brand-lockup">
+      <img class="mark" src="/mark.jpg" alt="">
+      <div class="brand-copy">
+        <p class="brand">璟豐</p>
+        <h1>PO文小多比</h1>
+      </div>
     </div>
     <p id="who"></p>
   </header>
-  <main id="app"><p class="muted">登入中…</p></main>
-  <nav id="tabs" hidden>
-    <button type="button" data-tab="week">當月</button>
-    <button type="button" data-tab="inbox">收任務</button>
-    <button type="button" data-tab="products" hidden>話術</button>
+  <main id="app" aria-busy="true">
+    <p class="sr-only">登入中</p>
+    <section class="panel boot-panel" aria-hidden="true">
+      <span class="skel w32"></span>
+      <span class="skel w64"></span>
+      <span class="skel w48"></span>
+    </section>
+    <div class="boot-card" aria-hidden="true">
+      <span class="skel"></span>
+      <span class="skel short"></span>
+    </div>
+    <div class="boot-card" aria-hidden="true">
+      <span class="skel"></span>
+      <span class="skel short"></span>
+    </div>
+  </main>
+  <nav id="tabs" hidden aria-label="主要">
+    <button type="button" data-tab="week">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"></rect><path d="M3.5 10h17M8 3.5v3M16 3.5v3"></path></svg>
+      <span>當月</span>
+    </button>
+    <button type="button" data-tab="inbox">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h4.2l1.6 2.2h4.4L15.8 13H20v6.2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19.2V13z"></path><path d="M4 13l2.2-7.2A1.5 1.5 0 0 1 7.6 4.8h8.8a1.5 1.5 0 0 1 1.4 1L20 13"></path></svg>
+      <span>收任務</span>
+    </button>
+    <button type="button" data-tab="products" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10a2 2 0 0 1 2 2V19l-3.2-1.8L12.5 19 9.2 17.2 6 19V6.5a2 2 0 0 1 2-2z"></path><path d="M9 9h6M9 12.5h4"></path></svg>
+      <span>話術</span>
+    </button>
+    <button type="button" data-tab="members" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"></circle><path d="M3.8 19c.5-2.8 2.6-4.2 5.2-4.2s4.7 1.4 5.2 4.2"></path><circle cx="17" cy="9" r="2.2"></circle><path d="M16.2 14.8c1.8.4 3.2 1.6 3.8 3.8"></path></svg>
+      <span>成員</span>
+    </button>
   </nav>
-  <div id="account" hidden>
+  <div id="account" hidden role="dialog" aria-modal="true" aria-labelledby="account-title">
     <div class="account-box">
-      <p>第幾個分身？</p>
+      <p id="account-title">第幾個分身？</p>
+      <p class="account-note">編號會印在截圖上。</p>
       <div class="account-grid">
-        <button type="button" data-account="1">1️⃣</button>
-        <button type="button" data-account="2">2️⃣</button>
-        <button type="button" data-account="3">3️⃣</button>
-        <button type="button" data-account="4">4️⃣</button>
-        <button type="button" data-account="5">5️⃣</button>
-        <button type="button" data-account="6">6️⃣</button>
-        <button type="button" data-account="7">7️⃣</button>
-        <button type="button" data-account="8">8️⃣</button>
-        <button type="button" data-account="9">9️⃣</button>
+        <button type="button" data-account="1">1</button>
+        <button type="button" data-account="2">2</button>
+        <button type="button" data-account="3">3</button>
+        <button type="button" data-account="4">4</button>
+        <button type="button" data-account="5">5</button>
+        <button type="button" data-account="6">6</button>
+        <button type="button" data-account="7">7</button>
+        <button type="button" data-account="8">8</button>
+        <button type="button" data-account="9">9</button>
       </div>
       <button type="button" class="ghost account-none" data-account="">無分身</button>
       <button type="button" class="ghost" id="account-cancel">取消</button>
     </div>
   </div>
-  <div id="busy" hidden>
+  <div id="busy" hidden role="alertdialog" aria-modal="true" aria-labelledby="busy-text" aria-busy="true">
     <div class="busy-box">
       <div class="spinner" aria-hidden="true"></div>
-      <p>正在押上編號…</p>
+      <p id="busy-text">正在押上編號…</p>
     </div>
   </div>
-  <p id="toast" hidden></p>
+  <p id="toast" hidden role="status" aria-live="polite"></p>
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <script src="/app.js"></script>
 </body>

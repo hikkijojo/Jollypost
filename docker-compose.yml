@@ -14,7 +14,6 @@ services:
       DB_USER: ${DB_USER:-jingfeng}
       DB_PASSWORD: ${DB_PASSWORD:-}
       DB_NAME: ${DB_NAME:-jingfeng}
-      LINE_ALLOWED_USER_IDS: ${LINE_ALLOWED_USER_IDS:-}
       LINE_ADMIN_USER_IDS: ${LINE_ADMIN_USER_IDS:-}
       LIFF_ID: ${LIFF_ID:-}
       LIFF_CHANNEL_ID: ${LIFF_CHANNEL_ID:-}

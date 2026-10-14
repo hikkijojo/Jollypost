@@ -907,6 +907,146 @@ func (s *Store) SaveThreadPreview(ctx context.Context, hash, author, body string
 	return err
 }
 
+type Member struct {
+	UserID      string    `json:"userId"`
+	DisplayName string    `json:"displayName"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+func (s *Store) SaveProfile(ctx context.Context, userID, name string, now time.Time) error {
+	name = trimRunes(strings.TrimSpace(name), 128)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO profiles (user_id, display_name, seen_at) VALUES (?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+		  display_name = IF(VALUES(display_name) = '', display_name, VALUES(display_name)),
+		  seen_at = VALUES(seen_at)`, userID, name, now)
+	return err
+}
+
+func (s *Store) ProfileNames(ctx context.Context, ids []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	marks := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT user_id, display_name FROM profiles WHERE user_id IN ("+marks+")", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) IsMember(ctx context.Context, userID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM members WHERE user_id = ?", userID).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Store) ListMembers(ctx context.Context) ([]Member, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT user_id, display_name, created_at FROM members ORDER BY created_at, user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Member
+	for rows.Next() {
+		var item Member
+		if err := rows.Scan(&item.UserID, &item.DisplayName, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if out == nil {
+		out = []Member{}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AddMember(ctx context.Context, userID, name string, now time.Time) error {
+	res, err := s.db.ExecContext(ctx, `
+		INSERT IGNORE INTO members (user_id, display_name, created_at) VALUES (?, ?, ?)`,
+		userID, trimRunes(strings.TrimSpace(name), 128), now)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return InputError{Msg: "已經在名單裡"}
+	}
+	return nil
+}
+
+func (s *Store) DeleteMember(ctx context.Context, userID string) error {
+	res, err := s.db.ExecContext(ctx, "DELETE FROM members WHERE user_id = ?", userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) TouchMemberName(ctx context.Context, userID, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE members SET display_name = ? WHERE user_id = ? AND display_name <> ?`,
+		trimRunes(name, 128), userID, name)
+	return err
+}
+
+func (s *Store) ImportMembersOnce(ctx context.Context, ids []string, now time.Time) error {
+	var n int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM app_meta WHERE k = 'members_imported'").Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT IGNORE INTO members (user_id, display_name, created_at) VALUES (?, '', ?)`, id, now); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO app_meta (k, v) VALUES ('members_imported', '1')"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func isDup(err error) bool {
 	var me *mysql.MySQLError
 	return errors.As(err, &me) && me.Number == 1062

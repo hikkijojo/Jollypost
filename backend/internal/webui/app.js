@@ -37,7 +37,11 @@ boot().catch((err) => {
     showForbidden(err.data);
     return;
   }
-  app.textContent = err.message || "打不開";
+  resetChrome();
+  document.querySelector("#tabs").hidden = true;
+  document.querySelector("#who").textContent = "";
+  app.innerHTML = `<section class="panel gate"><h2>打不開</h2><p class="lead">${esc(err.message || "打不開")}</p></section>`;
+  app.setAttribute("aria-busy", "false");
 });
 
 async function boot() {
@@ -109,30 +113,41 @@ async function api(method, path, body) {
 function render() {
   document.querySelector("#tabs").hidden = false;
   document.querySelector('[data-tab="products"]').hidden = !state.me.admin;
+  document.querySelector('[data-tab="members"]').hidden = !state.me.admin;
+  if (!state.me.admin && (state.tab === "products" || state.tab === "members")) state.tab = "week";
   document.querySelector("#who").textContent = state.me.displayName || "";
   document.querySelectorAll("#tabs button").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.tab === state.tab);
+    const on = btn.dataset.tab === state.tab;
+    btn.classList.toggle("active", on);
+    if (on) btn.setAttribute("aria-current", "page");
+    else btn.removeAttribute("aria-current");
   });
   if (state.tab === "inbox") renderInbox();
   if (state.tab === "week") renderWeek();
   if (state.tab === "products") renderProducts();
+  if (state.tab === "members") renderMembers();
+  syncChrome();
+  app.setAttribute("aria-busy", "false");
 }
 
 function renderInbox() {
   app.innerHTML = `
     <section class="panel">
+      <p class="eyebrow">收任務</p>
       <h2>貼上老闆的訊息</h2>
-      <p class="hint">10/11-3
+      <p class="lead">一段可以有多則。編號和貼文連結寫在一起，產品名稱可寫在連結下一行。</p>
+      <div class="sample">
+        <p class="sample-label">範例</p>
+        <pre>10/11-3
 https://www.threads.com/share/xxxx/
 
-或是
-
 https://www.threads.com/share/xxxx/
-Jolly 床邊床</p>
+Jolly 床邊床</pre>
+      </div>
       <label for="paste">訊息</label>
       <textarea id="paste" placeholder="整段貼上"></textarea>
       <div class="actions">
-        <button type="button" id="import">寫入當月任務</button>
+        <button type="button" class="wide" id="import">寫入當月任務</button>
       </div>
     </section>`;
   document.querySelector("#import").onclick = () => guard(importTasks);
@@ -157,11 +172,7 @@ function renderWeek() {
   const openTasks = all.filter((task) => task.status !== "submitted");
   const doneTasks = all.filter((task) => task.status === "submitted");
   const tasks = state.showDone ? doneTasks : openTasks;
-  const empty = all.length === 0
-    ? "這個月還沒有任務。"
-    : state.showDone
-      ? "還沒有已回的任務。"
-      : "待回的都處理完了。";
+  const emptyKind = all.length === 0 ? "none" : state.showDone ? "done" : "open";
   const openTask = all.find((task) => task.id === state.openTaskId) || null;
   if (!openTask) {
     state.openTaskId = null;
@@ -173,22 +184,23 @@ function renderWeek() {
       <div class="stage ${openTask && !animate ? "open" : ""}">
         <div class="stage-list">
           <section class="panel">
-            <div class="row">
-              <button type="button" id="month-prev" class="${week.week >= 0 ? "ghost" : ""}">上月</button>
-              <strong class="month-label">${esc(week.label)}</strong>
-              <button type="button" id="month-current" class="${week.week >= 0 ? "" : "ghost"}">當月</button>
+            <div class="segment" role="group" aria-label="選擇篇章">
+              <button type="button" id="month-prev" class="${week.week >= 0 ? "" : "is-on"}" aria-pressed="${week.week < 0}">上月</button>
+              <button type="button" id="month-current" class="${week.week >= 0 ? "is-on" : ""}" aria-pressed="${week.week >= 0}">當月</button>
             </div>
-            <p>共 ${week.total} 則，我已回 ${week.submitted} 則</p>
-            <div class="row">
-              <button type="button" id="filter-open" class="${state.showDone ? "ghost" : ""}">待回 ${openTasks.length}</button>
-              <button type="button" id="filter-done" class="${state.showDone ? "" : "ghost"}">已回 ${doneTasks.length}</button>
+            <h2 class="month-title">${esc(week.label)}</h2>
+            <p class="month-count">共 ${week.total} 則</p>
+            ${meter(week)}
+            <div class="segment stack-gap" role="group" aria-label="任務狀態">
+              <button type="button" id="filter-open" class="${state.showDone ? "" : "is-on"}" aria-pressed="${!state.showDone}">待回 ${openTasks.length}</button>
+              <button type="button" id="filter-done" class="${state.showDone ? "is-on" : ""}" aria-pressed="${state.showDone}">已回 ${doneTasks.length}</button>
             </div>
-            <ul class="stats">${(week.byUser || []).map((person) => `<li>${esc(person.name)}　已回 ${person.submitted} / ${person.total}</li>`).join("")}</ul>
+            ${week.total ? roster(week.byUser) : ""}
           </section>
-          ${tasks.length ? tasks.map(taskPreview).join("") : `<p class="muted">${empty}</p>`}
+          ${tasks.length ? tasks.map(taskPreview).join("") : emptyState(emptyKind)}
         </div>
         <div class="stage-detail">
-          ${openTask ? `<div class="actions"><button type="button" class="ghost" id="close-task">返回列表</button></div>${taskCard(openTask)}` : ""}
+          ${openTask ? taskCard(openTask) : ""}
         </div>
       </div>
     </div>`;
@@ -199,6 +211,7 @@ function renderWeek() {
       const stage = app.querySelector(".stage");
       if (stage) stage.classList.add("open");
       scrollDetailToTop();
+      syncStageA11y();
     });
   } else if (!openTask && state.restoreListScroll) {
     const y = state.listScroll || 0;
@@ -222,8 +235,8 @@ function renderWeek() {
       render();
     };
   });
-  const closeTask = document.querySelector("#close-task");
-  if (closeTask) closeTask.onclick = () => slideTaskClosed();
+  syncStageA11y();
+  bindDetailSwipe();
   app.querySelectorAll("[data-open]").forEach((btn) => {
     btn.onclick = () => openPost(btn.dataset.open);
   });
@@ -242,7 +255,11 @@ function renderWeek() {
   app.querySelectorAll("[data-upload]").forEach((btn) => {
     btn.onclick = () => {
       state.pendingTaskId = btn.dataset.upload;
-      document.querySelector("#account").hidden = false;
+      const dialog = document.querySelector("#account");
+      dialog.hidden = false;
+      lockPageScroll(true);
+      const first = dialog.querySelector(".account-grid button");
+      if (first) first.focus({ preventScroll: true });
     };
   });
   app.querySelectorAll("[data-file]").forEach((input) => {
@@ -294,18 +311,25 @@ function slideTaskClosed() {
 
 function taskPreview(task) {
   const product = state.products.find((item) => item.id === task.productId);
-  const status = { pending: "待回", copied: "已複製", submitted: "已交圖" }[task.status] || task.status;
+  const meta = statusMeta(task.status);
   const title = product ? product.name : (task.productText || "尚未選產品");
   return `
     <button type="button" class="preview" data-open-task="${task.id}">
-      ${threadBlock(task.id, "")}
-      <span class="preview-top">
-        <span class="code">${esc(task.code)}</span>
-        <span class="badge ${task.status === "submitted" ? "ok" : ""}">${esc(status)}</span>
+      <span class="preview-media" data-thread="${task.id}">
+        <img class="thread-photo" alt="" hidden>
+        <span class="thread-fallback" aria-hidden="true"></span>
       </span>
-      <span class="preview-title">${esc(title)}</span>
-      <span class="muted">${esc(task.createdByName)} · ${esc(shortTime(task.createdAt))}</span>
-      ${task.replyText ? `<span class="preview-reply">${esc(task.replyText)}</span>` : ""}
+      <span class="preview-main">
+        <span class="preview-top">
+          <span class="code">${esc(task.code)}</span>
+          <span class="badge ${meta.badge}">${esc(meta.label)}</span>
+        </span>
+        <span class="preview-title">${esc(title)}</span>
+        <span class="thread-author"></span>
+        <span class="thread-body"><span class="skel"></span><span class="skel short"></span></span>
+        <span class="muted">${esc(task.createdByName)} · ${esc(shortTime(task.createdAt))}</span>
+        ${task.replyText ? `<span class="preview-reply">${esc(task.replyText)}</span>` : ""}
+      </span>
     </button>`;
 }
 
@@ -313,9 +337,10 @@ function threadBlock(taskId, extra) {
   return `
     <span class="thread ${extra}" data-thread="${taskId}">
       <img class="thread-photo" alt="" hidden>
+      <span class="thread-fallback" aria-hidden="true"></span>
       <span class="thread-copy">
         <span class="thread-author"></span>
-        <span class="thread-body">正在讀取貼文…</span>
+        <span class="thread-body"><span class="skel"></span><span class="skel short"></span></span>
       </span>
     </span>`;
 }
@@ -323,7 +348,7 @@ function threadBlock(taskId, extra) {
 function taskCard(task) {
   const product = state.products.find((item) => item.id === task.productId);
   const lines = product ? product.lines.map((line) => applyProductName(line, product.name)) : [];
-  const status = { pending: "待回", copied: "已複製", submitted: "已交圖" }[task.status] || task.status;
+  const meta = statusMeta(task.status);
   const replies = `
       <div class="picker" data-picker="${task.id}">
         <div>
@@ -343,29 +368,29 @@ function taskCard(task) {
           </select>
         </div>
       </div>
-      ${lines.length ? lines.map((line) => `<button type="button" class="reply" data-copy="${task.id}" data-text="${esc(line)}">${esc(line)}</button>`).join("") : `<p class="muted">先選擇產品，才看得到這個類型的話術。</p>`}`;
+      ${lines.length ? `<p class="copy-hint">點一句就會複製</p>` + lines.map((line) => `<button type="button" class="reply" data-copy="${task.id}" data-text="${esc(line)}">${esc(line)}</button>`).join("") : `<p class="muted">先選擇產品，才看得到這個類型的話術。</p>`}`;
   const replyBlock = task.status === "submitted"
     ? `<details class="fold"><summary>推薦話術</summary>${replies}</details>`
     : replies;
   return `
     <article class="card">
       <p class="code">${esc(task.code)}</p>
-      <p>
-        <span class="badge ${task.status === "submitted" ? "ok" : ""}">${esc(status)}</span>
-        ${task.duplicate ? `<span class="badge warn">這個月已有這則連結</span>` : ""}
-        ${task.unmatched ? `<span class="badge warn">清單沒有「${esc(task.productText)}」</span>` : ""}
+      <p class="badge-row">
+        <span class="badge ${meta.badge}">${esc(meta.label)}</span>
       </p>
-      ${task.replyText ? `<p class="muted">我的回文：${esc(task.replyText)}</p>` : ""}
-      <p class="muted">${esc(task.createdByName)} · ${esc(shortTime(task.createdAt))}${product ? " · " + esc(product.categoryName) : ""}</p>
+      ${task.duplicate ? `<p class="callout">這個月已經有人收過這則連結。</p>` : ""}
+      ${task.unmatched ? `<p class="callout">清單裡沒有「${esc(task.productText)}」，請手動選產品。</p>` : ""}
+      ${task.replyText ? `<p class="mine"><span>我的回文</span>${esc(task.replyText)}</p>` : ""}
+      <p class="meta">${esc(task.createdByName)} · ${esc(shortTime(task.createdAt))}${product ? " · " + esc(product.categoryName) : ""}</p>
       ${threadBlock(task.id, "detail")}
       <div class="actions">
-        <button type="button" class="ghost" data-open="${esc(task.url)}">打開貼文</button>
+        <button type="button" class="ghost wide" data-open="${esc(task.url)}">打開貼文</button>
       </div>
       ${replyBlock}
-      <div class="actions">
-        <button type="button" class="file" data-upload="${task.id}">上傳截圖押編號</button>
+      <div class="submit-row">
+        <button type="button" data-upload="${task.id}">上傳截圖押編號</button>
         <input data-file="${task.id}" type="file" accept="image/*" hidden>
-        <button type="button" class="danger" data-delete="${task.id}">刪除</button>
+        <button type="button" class="text-danger" data-delete="${task.id}">刪除任務</button>
       </div>
       ${task.hasProof ? `<img class="proof" alt="已押上 ${esc(task.code)}" data-proof="/api/tasks/${task.id}/proof" data-proof-id="${task.id}"><button type="button" class="save" data-download="${task.id}" data-code="${esc(task.code)}">存到相簿</button>` : ""}
     </article>`;
@@ -428,13 +453,135 @@ function applyProductName(line, name) {
 }
 
 function scrollDetailToTop() {
+  const header = document.querySelector("header");
+  const headerH = header ? header.offsetHeight : 0;
   const detail = app.querySelector(".stage-detail");
   if (!detail) {
     window.scrollTo(0, 0);
     return;
   }
   const y = detail.getBoundingClientRect().top + (window.scrollY || document.documentElement.scrollTop || 0);
-  window.scrollTo(0, Math.max(0, y - 8));
+  window.scrollTo(0, Math.max(0, y - headerH - 4));
+}
+
+function statusMeta(status) {
+  if (status === "submitted") return { label: "已交圖", badge: "ok" };
+  if (status === "copied") return { label: "已複製", badge: "progress" };
+  if (status === "pending") return { label: "待回", badge: "" };
+  return { label: status || "", badge: "" };
+}
+
+function meter(week) {
+  const total = Number(week.total) || 0;
+  if (!total) return "";
+  const done = Number(week.submitted) || 0;
+  const width = Math.round((done / total) * 100);
+  return `
+    <div class="meter">
+      <div class="meter-row"><span>我的進度</span><b>${done}/${total}</b></div>
+      <div class="meter-track" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}" aria-label="我的回文進度">
+        <span style="width:${width}%"></span>
+      </div>
+    </div>`;
+}
+
+function roster(people) {
+  const rows = people || [];
+  if (!rows.length) return "";
+  return `
+    <details class="roster-fold">
+      <summary>大家的進度</summary>
+      <ul class="roster">${rows.map((person) => `<li><span>${esc(person.name)}</span><b>${person.submitted}<span>/${person.total}</span></b></li>`).join("")}</ul>
+    </details>`;
+}
+
+function emptyState(kind) {
+  const copy = {
+    none: ["這個月還沒有任務", "到「收任務」貼上老闆的訊息，就會列在這裡。"],
+    open: ["待回的都處理完了", "可以切到「已回」，查看交過圖的任務。"],
+    done: ["還沒有已回的任務", "複製話術或上傳截圖之後，會出現在這裡。"],
+    types: ["還沒有類型", "話術類型會出現在這裡。"],
+  };
+  const item = copy[kind] || copy.none;
+  return `<div class="empty"><p class="empty-title">${item[0]}</p><p>${item[1]}</p></div>`;
+}
+
+function syncChrome() {
+  const header = document.querySelector("header");
+  const openTask = state.tab === "week" && state.week
+    ? (state.week.tasks || []).find((task) => task.id === state.openTaskId)
+    : null;
+  let back = header.querySelector(".header-back");
+  if (openTask) {
+    if (!back) {
+      back = document.createElement("button");
+      back.type = "button";
+      back.className = "header-back";
+      back.textContent = "返回";
+      back.setAttribute("aria-label", "返回列表");
+      header.querySelector(".brand-lockup").before(back);
+    }
+    back.onclick = () => slideTaskClosed();
+    header.classList.add("has-back");
+    header.querySelector(".brand").textContent = "編號";
+    header.querySelector("h1").textContent = openTask.code;
+  } else {
+    if (back) back.remove();
+    header.classList.remove("has-back");
+    header.querySelector(".brand").textContent = "璟豐";
+    header.querySelector("h1").textContent = "PO文小多比";
+  }
+  document.documentElement.style.setProperty("--header-h", header.offsetHeight + "px");
+}
+
+function resetChrome() {
+  state.openTaskId = null;
+  state.slideTaskId = null;
+  const header = document.querySelector("header");
+  const back = header.querySelector(".header-back");
+  if (back) back.remove();
+  header.classList.remove("has-back");
+  header.querySelector(".brand").textContent = "璟豐";
+  header.querySelector("h1").textContent = "PO文小多比";
+}
+
+function syncStageA11y() {
+  const stage = app.querySelector(".stage");
+  if (!stage) return;
+  const list = stage.querySelector(".stage-list");
+  const detail = stage.querySelector(".stage-detail");
+  const open = stage.classList.contains("open");
+  if (list) {
+    list.toggleAttribute("inert", open);
+    list.setAttribute("aria-hidden", open ? "true" : "false");
+  }
+  if (detail) {
+    detail.toggleAttribute("inert", !open);
+    detail.setAttribute("aria-hidden", open ? "false" : "true");
+  }
+}
+
+function bindDetailSwipe() {
+  const detail = app.querySelector(".stage-detail");
+  if (!detail) return;
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+  detail.addEventListener("touchstart", (event) => {
+    if (!app.querySelector(".stage.open")) return;
+    const touch = event.changedTouches[0];
+    startX = touch.clientX;
+    startY = touch.clientY;
+    tracking = startX < 32;
+  }, { passive: true });
+  detail.addEventListener("touchend", (event) => {
+    if (!tracking) return;
+    tracking = false;
+    const touch = event.changedTouches[0];
+    const dx = touch.clientX - startX;
+    const dy = touch.clientY - startY;
+    if (dx > 72 && Math.abs(dx) > Math.abs(dy) * 1.2) slideTaskClosed();
+  }, { passive: true });
 }
 
 async function moveMonth(offset) {
@@ -522,7 +669,11 @@ async function fetchThread(id) {
     data = await api("GET", "/api/tasks/" + id + "/thread");
   } catch (err) {
     threadLoading.delete(id);
-    if (err instanceof Unauthorized) showLogin();
+    if (err instanceof Unauthorized) {
+      showLogin();
+      return;
+    }
+    paintThread(id, { author: "", body: "這則貼文暫時讀不到", photo: "" });
     return;
   }
   let photo = "";
@@ -553,14 +704,21 @@ async function fetchThread(id) {
 
 function paintThread(id, card) {
   app.querySelectorAll(`[data-thread="${CSS.escape(id)}"]`).forEach((node) => {
-    const author = node.querySelector(".thread-author");
-    const body = node.querySelector(".thread-body");
+    const scope = node.classList.contains("preview-media") ? node.parentElement : node;
+    const author = scope.querySelector(".thread-author");
+    const body = scope.querySelector(".thread-body");
     const photo = node.querySelector(".thread-photo");
-    if (author) author.textContent = card.author || "Threads";
+    const fallback = node.querySelector(".thread-fallback");
+    const name = card.author || "Threads";
+    if (author) author.textContent = name;
     if (body) body.textContent = card.body || "這則貼文暫時讀不到";
     if (photo && card.photo) {
       photo.src = card.photo;
+      photo.alt = card.author ? card.author + "的貼文圖片" : "貼文圖片";
       photo.hidden = false;
+      if (fallback) fallback.textContent = "";
+    } else if (fallback) {
+      fallback.textContent = name.slice(0, 1);
     }
   });
 }
@@ -642,17 +800,98 @@ function showBusy(message) {
   const el = document.querySelector("#busy");
   el.hidden = false;
   el.querySelector("p").textContent = message || "處理中…";
+  lockPageScroll(true);
 }
 
 function hideBusy() {
   document.querySelector("#busy").hidden = true;
+  lockPageScroll(false);
+}
+
+function lockPageScroll(on) {
+  document.body.style.overflow = on ? "hidden" : "";
+}
+
+async function renderMembers() {
+  const gen = (state.memberGen || 0) + 1;
+  state.memberGen = gen;
+  app.innerHTML = `<section class="panel"><p class="muted">讀取名單…</p></section>`;
+  try {
+    const data = await api("GET", "/api/members");
+    if (gen !== state.memberGen || state.tab !== "members") return;
+    const admins = data.admins || [];
+    const members = data.members || [];
+    app.innerHTML = `
+      <section class="panel">
+        <p class="eyebrow">成員</p>
+        <h2>可以使用的人</h2>
+        <p class="lead">一般使用者可以在這裡加入或移除。管理者列在最上面，調整要改伺服器的 LINE_ADMIN_USER_IDS。</p>
+        <h3 class="list-label">管理者 ${admins.length}</h3>
+        <ul class="product-list member-list">${admins.map((person) => personRow(person, false)).join("")}</ul>
+        <h3 class="list-label">一般使用者 ${members.length}</h3>
+        ${members.length ? `<ul class="product-list member-list">${members.map((person) => personRow(person, true)).join("")}</ul>` : `<p class="muted">還沒有一般使用者。</p>`}
+      </section>
+      <section class="panel">
+        <h2>加入一般使用者</h2>
+        <form id="add-member">
+          <label for="member-id">LINE userId</label>
+          <input id="member-id" name="userId" type="text" required autocomplete="off" spellcheck="false" placeholder="U 開頭的 userId">
+          <label for="member-name">怎麼稱呼</label>
+          <input id="member-name" name="displayName" type="text" autocomplete="off" placeholder="可空白，對方登入後會補上">
+          <div class="actions"><button type="submit" class="wide">加入名單</button></div>
+        </form>
+      </section>`;
+    const form = document.querySelector("#add-member");
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      guard(() => addMember(form));
+    };
+    app.querySelectorAll("[data-remove-member]").forEach((btn) => {
+      btn.onclick = () => guard(() => removeMember(btn.dataset.removeMember));
+    });
+  } catch (err) {
+    if (gen !== state.memberGen || state.tab !== "members") return;
+    if (err instanceof Unauthorized) {
+      showLogin();
+      return;
+    }
+    if (err instanceof Forbidden) {
+      showForbidden(err.data);
+      return;
+    }
+    app.innerHTML = `<section class="panel gate"><h2>名單打不開</h2><p class="lead">${esc(err.message || "讀取失敗")}</p></section>`;
+  }
+}
+
+function personRow(person, removable) {
+  const name = person.displayName || "尚未有稱呼";
+  const action = removable
+    ? `<button type="button" class="text-danger" data-remove-member="${esc(person.userId)}">移除</button>`
+    : `<span class="badge">管理者</span>`;
+  return `<li><span><b>${esc(name)}</b><span class="member-id">${esc(person.userId)}</span></span>${action}</li>`;
+}
+
+async function addMember(form) {
+  await api("POST", "/api/members", {
+    userId: form.querySelector("[name=userId]").value,
+    displayName: form.querySelector("[name=displayName]").value,
+  });
+  toast("已加入");
+  renderMembers();
+}
+
+async function removeMember(userId) {
+  if (!confirm("從名單移除後，這個人就不能再進來。")) return;
+  await api("DELETE", "/api/members/" + encodeURIComponent(userId));
+  toast("已移除");
+  renderMembers();
 }
 
 function renderProducts() {
   const categories = state.categories || [];
   app.innerHTML = categories.length
-    ? categories.map(categoryCard).join("")
-    : `<p class="muted">還沒有類型。</p>`;
+    ? `<p class="page-lead">同一個類型共用這組話術。句子裡的 {產品} 會換成當時選到的名稱。</p>${categories.map(categoryCard).join("")}`
+    : emptyState("types");
   app.querySelectorAll("form[data-category]").forEach((form) => {
     form.onsubmit = (event) => {
       event.preventDefault();
@@ -675,7 +914,7 @@ function categoryCard(category) {
   const count = Math.min(20, Math.max(lines.length + 1, 10));
   const boxes = [];
   for (let i = 0; i < count; i += 1) {
-    boxes.push(`<textarea class="line" name="line">${esc(lines[i] || "")}</textarea>`);
+    boxes.push(`<div class="line-row"><span class="line-no">${i + 1}</span><textarea class="line" name="line" placeholder="再加一句">${esc(lines[i] || "")}</textarea></div>`);
   }
   const products = category.products || [];
   return `
@@ -684,12 +923,12 @@ function categoryCard(category) {
       <form data-category="${category.id}">
         <label>類型名稱</label>
         <input type="text" name="name" value="${esc(category.name)}" required>
-        <p class="muted">話術裡的 {產品} 會換成當時選到的產品名稱。空行不會存。</p>
+        <p class="muted">空行不會存。</p>
         ${boxes.join("")}
-        <div class="actions"><button type="submit">儲存話術</button></div>
+        <div class="actions"><button type="submit" class="wide">儲存話術</button></div>
       </form>
-      <ul class="stats">
-        ${products.map((item) => `<li>${esc(item.name)} <button type="button" class="danger" data-remove-product="${item.id}">刪除</button></li>`).join("")}
+      <ul class="product-list">
+        ${products.map((item) => `<li><span>${esc(item.name)}</span><button type="button" class="text-danger" data-remove-product="${item.id}">刪除</button></li>`).join("")}
       </ul>
       <form data-add-product="${category.id}">
         <label>在這個類型加產品</label>
@@ -749,6 +988,9 @@ async function writeClipboard(text) {
 }
 
 async function guard(fn) {
+  const el = document.activeElement;
+  const lock = el && (el.tagName === "BUTTON" || el.tagName === "SELECT") && !el.disabled ? el : null;
+  if (lock) lock.disabled = true;
   try {
     await fn();
   } catch (err) {
@@ -761,6 +1003,8 @@ async function guard(fn) {
       return;
     }
     toast(err.message || "失敗");
+  } finally {
+    if (lock && lock.isConnected) lock.disabled = false;
   }
 }
 
@@ -769,28 +1013,36 @@ function showLogin() {
   const busy = document.querySelector("#busy");
   if (account) account.hidden = true;
   if (busy) busy.hidden = true;
+  lockPageScroll(false);
+  resetChrome();
   document.querySelector("#tabs").hidden = true;
   document.querySelector("#who").textContent = "";
   app.innerHTML = `
-    <section class="panel">
+    <section class="panel gate">
+      <p class="eyebrow">登入</p>
       <h2>需要重新登入</h2>
-      <p>這次的 LINE 登入已經失效。按下面的按鈕，再用 LINE 登入一次。</p>
-      <button type="button" id="relogin">重新登入</button>
+      <p class="lead">這次的 LINE 登入已經失效。再用 LINE 登入一次即可。</p>
+      <button type="button" class="wide" id="relogin">重新登入</button>
     </section>`;
+  app.setAttribute("aria-busy", "false");
   document.querySelector("#relogin").onclick = () => relogin();
 }
 
 function showForbidden(data) {
+  lockPageScroll(false);
+  resetChrome();
   document.querySelector("#tabs").hidden = true;
   document.querySelector("#who").textContent = "";
   app.innerHTML = `
-    <section class="panel">
+    <section class="panel gate">
+      <p class="eyebrow">尚未加入</p>
       <h2>這個帳號還沒加入</h2>
-      <p>${esc(data.displayName || "")}</p>
+      <p class="lead">${esc(data.displayName || "這組 LINE 帳號還不在名單裡。")}</p>
       <p class="user-id" id="uid">${esc(data.userId || "")}</p>
-      <p>把上面的 userId 加進 <code>.env</code> 的 <code>LINE_ALLOWED_USER_IDS</code>。若也要改話術，同時加進 <code>LINE_ADMIN_USER_IDS</code>。存檔後重新整理。</p>
-      <button type="button" id="copy-id">複製 userId</button>
+      <p class="muted">把上面的 userId 貼給管理者，請對方在「成員」加入。管理者本人不用加，那是伺服器上的 LINE_ADMIN_USER_IDS。</p>
+      <div class="actions"><button type="button" id="copy-id">複製 userId</button></div>
     </section>`;
+  app.setAttribute("aria-busy", "false");
   document.querySelector("#copy-id").onclick = () => guard(async () => {
     await writeClipboard(data.userId || "");
     toast("已複製");
@@ -820,22 +1072,38 @@ function shortTime(value) {
 bindAccountPicker();
 
 function bindAccountPicker() {
+  const dialog = document.querySelector("#account");
+  const closeAccount = () => {
+    state.pendingTaskId = "";
+    dialog.hidden = true;
+    lockPageScroll(false);
+  };
+  dialog.addEventListener("click", (event) => {
+    if (event.target !== dialog) return;
+    closeAccount();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!dialog.hidden) {
+      closeAccount();
+      return;
+    }
+    if (state.tab === "week" && state.openTaskId) slideTaskClosed();
+  });
   document.querySelectorAll("#account [data-account]").forEach((btn) => {
     btn.onclick = () => {
       const taskId = state.pendingTaskId;
       const account = btn.dataset.account;
       state.pendingTaskId = "";
-      document.querySelector("#account").hidden = true;
+      dialog.hidden = true;
+      lockPageScroll(false);
       const input = app.querySelector(`[data-file="${taskId}"]`);
       if (!input) return;
       input.dataset.account = account;
       input.click();
     };
   });
-  document.querySelector("#account-cancel").onclick = () => {
-    state.pendingTaskId = "";
-    document.querySelector("#account").hidden = true;
-  };
+  document.querySelector("#account-cancel").onclick = () => closeAccount();
 }
 
 function esc(value) {

@@ -85,6 +85,20 @@ CREATE TABLE IF NOT EXISTS thread_previews (
   PRIMARY KEY (url_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS profiles (
+  user_id VARCHAR(64) NOT NULL,
+  display_name VARCHAR(128) NOT NULL DEFAULT '',
+  seen_at DATETIME NOT NULL,
+  PRIMARY KEY (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS members (
+  user_id VARCHAR(64) NOT NULL,
+  display_name VARCHAR(128) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS app_meta (
   k VARCHAR(32) NOT NULL,
   v VARCHAR(255) NOT NULL,
