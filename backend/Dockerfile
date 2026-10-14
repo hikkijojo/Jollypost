@@ -1,0 +1,17 @@
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+COPY . .
+RUN go mod tidy
+RUN CGO_ENABLED=0 GOOS=linux go build -o /server ./cmd/server
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata
+ENV TZ=Asia/Taipei
+
+WORKDIR /app
+COPY --from=builder /server /app/server
+
+EXPOSE 8080
+CMD ["/app/server"]

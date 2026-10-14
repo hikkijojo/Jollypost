@@ -1,0 +1,52 @@
+name: jingfeng-helper
+
+services:
+  api:
+    build: ./backend
+    container_name: jingfeng-helper-api
+    ports:
+      - "${BACKEND_PORT:-38980}:8080"
+    environment:
+      PORT: 8080
+      TZ: Asia/Taipei
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: ${DB_USER:-jingfeng}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_NAME: ${DB_NAME:-jingfeng}
+      LINE_ALLOWED_USER_IDS: ${LINE_ALLOWED_USER_IDS:-}
+      LINE_ADMIN_USER_IDS: ${LINE_ADMIN_USER_IDS:-}
+      LIFF_ID: ${LIFF_ID:-}
+      LIFF_CHANNEL_ID: ${LIFF_CHANNEL_ID:-}
+      UPLOAD_DIR: /data/uploads
+      ENV_FILE: /app/.env
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./data/uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: mysql:8.0
+    container_name: jingfeng-helper-db
+    ports:
+      - "127.0.0.1:${DB_PORT:-38986}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-}
+      MYSQL_DATABASE: ${DB_NAME:-jingfeng}
+      MYSQL_USER: ${DB_USER:-jingfeng}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-}
+      TZ: Asia/Taipei
+    command: mysqld --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-time-zone=+8:00
+    volumes:
+      - ./db/data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
