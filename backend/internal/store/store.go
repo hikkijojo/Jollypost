@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -571,8 +572,7 @@ func (s *Store) WeekTasks(ctx context.Context, start, end time.Time, userID stri
 		FROM tasks t
 		LEFT JOIN task_replies r ON r.task_id = t.id AND r.user_id = ?
 		LEFT JOIN proofs p ON p.task_id = t.id AND p.user_id = ?
-		WHERE t.created_at >= ? AND t.created_at < ?
-		ORDER BY t.created_at, t.id`, userID, userID, start, end)
+		WHERE t.created_at >= ? AND t.created_at < ?`, userID, userID, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +588,48 @@ func (s *Store) WeekTasks(ctx context.Context, start, end time.Time, userID stri
 	if tasks == nil {
 		tasks = []Task{}
 	}
-	return tasks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sortTasksByCodeDate(tasks)
+	return tasks, nil
+}
+
+// sortTasksByCodeDate 依編號裡的日期排。結算篇章從 26 日到下月 25 日，
+// 所以 26 日以後的日期在前，1–25 日在後；同一天再依流水號。
+func sortTasksByCodeDate(tasks []Task) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		ai, okI := codeDateKey(tasks[i].Code)
+		aj, okJ := codeDateKey(tasks[j].Code)
+		if okI != okJ {
+			return okI
+		}
+		if !okI {
+			if !tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
+				return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+			}
+			return tasks[i].ID < tasks[j].ID
+		}
+		if ai != aj {
+			return ai < aj
+		}
+		return tasks[i].ID < tasks[j].ID
+	})
+}
+
+func codeDateKey(code string) (int, bool) {
+	var month, day, n int
+	if _, err := fmt.Sscanf(code, "%d/%d-%d", &month, &day, &n); err != nil {
+		return 0, false
+	}
+	if month < 1 || month > 12 || day < 1 || day > 31 || n < 1 {
+		return 0, false
+	}
+	phase := 1
+	if day >= 26 {
+		phase = 0
+	}
+	return phase*10_000_000 + month*100_000 + day*1_000 + n, true
 }
 
 func (s *Store) WeekReplyStats(ctx context.Context, start, end time.Time) ([]ReplyStat, error) {
