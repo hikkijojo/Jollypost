@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   id BIGINT NOT NULL AUTO_INCREMENT,
   code VARCHAR(16) NOT NULL,
   code_year SMALLINT NOT NULL,
+  code_date DATE NOT NULL,
   threads_url VARCHAR(512) NOT NULL,
   product_text VARCHAR(128) NOT NULL DEFAULT '',
   product_id BIGINT NULL,
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   PRIMARY KEY (id),
   UNIQUE KEY uq_tasks_code (code_year, code),
   KEY idx_tasks_created (created_at),
+  KEY idx_tasks_code_date (code_date),
   KEY idx_tasks_url (threads_url),
   CONSTRAINT fk_tasks_product FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -63,6 +65,7 @@ CREATE TABLE IF NOT EXISTS task_replies (
   user_name VARCHAR(128) NOT NULL DEFAULT '',
   reply_text VARCHAR(500) NOT NULL DEFAULT '',
   status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  needs_reproof TINYINT(1) NOT NULL DEFAULT 0,
   updated_at DATETIME NOT NULL,
   PRIMARY KEY (task_id, user_id),
   CONSTRAINT fk_task_replies_task FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE

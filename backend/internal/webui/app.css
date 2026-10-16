@@ -577,6 +577,43 @@ select:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.code-edit {
+  display: grid;
+  gap: 10px;
+}
+
+.code-edit .code {
+  font-size: 32px;
+}
+
+.code-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.code-edit-grid input[type="number"] {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.code-edit > button {
+  justify-self: start;
+}
+
+@media (max-width: 420px) {
+  .code-edit-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
 
 .badge {

@@ -276,6 +276,9 @@ function renderWeek() {
   app.querySelectorAll("[data-delete]").forEach((btn) => {
     btn.onclick = () => guard(() => removeTask(btn.dataset.delete));
   });
+  app.querySelectorAll("[data-save-code]").forEach((btn) => {
+    btn.onclick = () => guard(() => saveTaskCode(btn.dataset.saveCode));
+  });
   app.querySelectorAll("[data-proof]").forEach((img) => {
     loadProof(img);
   });
@@ -349,6 +352,8 @@ function taskCard(task) {
   const product = state.products.find((item) => item.id === task.productId);
   const lines = product ? product.lines.map((line) => applyProductName(line, product.name)) : [];
   const meta = statusMeta(task.status);
+  const parts = parseTaskCode(task);
+  const canEditCode = Boolean(state.me && (state.me.admin || state.me.userId === task.createdBy));
   const replies = `
       <div class="picker" data-picker="${task.id}">
         <div>
@@ -372,12 +377,37 @@ function taskCard(task) {
   const replyBlock = task.status === "submitted"
     ? `<details class="fold"><summary>推薦話術</summary>${replies}</details>`
     : replies;
+  const codeBlock = canEditCode
+    ? `<div class="code-edit" data-code-edit="${task.id}">
+        <p class="code">${esc(task.codeYear)}年 ${esc(task.code)}</p>
+        <div class="code-edit-grid">
+          <div>
+            <label for="code-year-${task.id}">年</label>
+            <input id="code-year-${task.id}" type="number" inputmode="numeric" data-code-year value="${parts.year}" min="2000" max="2100">
+          </div>
+          <div>
+            <label for="code-month-${task.id}">月</label>
+            <input id="code-month-${task.id}" type="number" inputmode="numeric" data-code-month value="${parts.month}" min="1" max="12">
+          </div>
+          <div>
+            <label for="code-day-${task.id}">日</label>
+            <input id="code-day-${task.id}" type="number" inputmode="numeric" data-code-day value="${parts.day}" min="1" max="31">
+          </div>
+          <div>
+            <label for="code-serial-${task.id}">流水</label>
+            <input id="code-serial-${task.id}" type="number" inputmode="numeric" data-code-serial value="${parts.serial}" min="1" max="999">
+          </div>
+        </div>
+        <button type="button" class="ghost" data-save-code="${task.id}">儲存編號</button>
+      </div>`
+    : `<p class="code">${esc(task.codeYear)}年 ${esc(task.code)}</p>`;
   return `
     <article class="card">
-      <p class="code">${esc(task.code)}</p>
+      ${codeBlock}
       <p class="badge-row">
         <span class="badge ${meta.badge}">${esc(meta.label)}</span>
       </p>
+      ${task.needsReproof ? `<p class="callout">編號已變更，請重新上傳截圖。</p>` : ""}
       ${task.duplicate ? `<p class="callout">這個月已經有人收過這則連結。</p>` : ""}
       ${task.unmatched ? `<p class="callout">清單裡沒有「${esc(task.productText)}」，請手動選產品。</p>` : ""}
       ${task.replyText ? `<p class="mine"><span>我的回文</span>${esc(task.replyText)}</p>` : ""}
@@ -394,6 +424,20 @@ function taskCard(task) {
       </div>
       ${task.hasProof ? `<img class="proof" alt="已押上 ${esc(task.code)}" data-proof="/api/tasks/${task.id}/proof" data-proof-id="${task.id}"><button type="button" class="save" data-download="${task.id}" data-code="${esc(task.code)}">存到相簿</button>` : ""}
     </article>`;
+}
+
+function parseTaskCode(task) {
+  const match = String(task.code || "").match(/^(\d{1,2})\/(\d{1,2})-(\d+)$/);
+  const year = Number(task.codeYear) || new Date().getFullYear();
+  if (!match) {
+    return { year, month: 1, day: 1, serial: 1 };
+  }
+  return {
+    year,
+    month: Number(match[1]),
+    day: Number(match[2]),
+    serial: Number(match[3]),
+  };
 }
 
 function categoryOptions(selectedId) {
@@ -524,7 +568,9 @@ function syncChrome() {
     back.onclick = () => slideTaskClosed();
     header.classList.add("has-back");
     header.querySelector(".brand").textContent = "編號";
-    header.querySelector("h1").textContent = openTask.code;
+    header.querySelector("h1").textContent = openTask.codeYear
+      ? `${openTask.codeYear}年 ${openTask.code}`
+      : openTask.code;
   } else {
     if (back) back.remove();
     header.classList.remove("has-back");
@@ -598,6 +644,36 @@ async function changeProduct(taskId, productId) {
   if (!productId) return;
   await api("PATCH", "/api/tasks/" + taskId, { productId: Number(productId) });
   state.week = await api("GET", "/api/tasks?week=" + state.weekOffset);
+  render();
+}
+
+async function saveTaskCode(taskId) {
+  const box = app.querySelector(`[data-code-edit="${taskId}"]`);
+  if (!box) return;
+  const year = Number(box.querySelector("[data-code-year]").value);
+  const month = Number(box.querySelector("[data-code-month]").value);
+  const day = Number(box.querySelector("[data-code-day]").value);
+  const serial = Number(box.querySelector("[data-code-serial]").value);
+  if (![year, month, day, serial].every((n) => Number.isInteger(n) && n > 0)) {
+    toast("請填齊年份、日期和流水號");
+    return;
+  }
+  if (!confirm("若已有人交過圖，截圖會清空並請對方重傳。確定要改編號？")) return;
+  const result = await api("PATCH", "/api/tasks/" + taskId, { codeYear: year, month, day, serial });
+  proofBlobs.delete(String(taskId));
+  state.week = await api("GET", "/api/tasks?week=" + state.weekOffset);
+  const stillHere = (state.week.tasks || []).some((task) => task.id === Number(taskId));
+  if (!stillHere) {
+    state.openTaskId = null;
+    state.slideTaskId = null;
+    toast(result.proofsCleared
+      ? "編號已更新，任務已移到其他篇章；交過圖的人請重傳"
+      : "編號已更新，任務已移到其他篇章");
+  } else {
+    toast(result.proofsCleared
+      ? "編號已更新；交過圖的人請重新上傳截圖"
+      : "編號已更新");
+  }
   render();
 }
 

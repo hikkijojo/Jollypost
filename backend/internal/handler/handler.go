@@ -346,17 +346,58 @@ func (a *App) patchTask(w http.ResponseWriter, r *http.Request, user User) {
 		return
 	}
 	var req struct {
-		ProductID int64 `json:"productId"`
+		ProductID *int64 `json:"productId"`
+		CodeYear  *int   `json:"codeYear"`
+		Month     *int   `json:"month"`
+		Day       *int   `json:"day"`
+		Serial    *int   `json:"serial"`
 	}
 	if err := httpx.Decode(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_JSON", "請求格式錯誤")
 		return
 	}
-	if req.ProductID <= 0 {
+	if req.CodeYear != nil || req.Month != nil || req.Day != nil || req.Serial != nil {
+		if req.CodeYear == nil || req.Month == nil || req.Day == nil || req.Serial == nil {
+			httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "請填齊年份、日期和流水號")
+			return
+		}
+		createdBy, err := a.Store.TaskCreatedBy(r.Context(), id)
+		if errors.Is(err, sql.ErrNoRows) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "找不到這則任務")
+			return
+		}
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		if !user.Admin && user.ID != createdBy {
+			httpx.WriteError(w, http.StatusForbidden, "FORBIDDEN", "只有建立者或管理者可以改編號")
+			return
+		}
+		code := fmt.Sprintf("%d/%d-%d", *req.Month, *req.Day, *req.Serial)
+		result, err := a.Store.UpdateTaskCode(r.Context(), id, *req.CodeYear, code, user.ID, time.Now())
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		for _, ref := range result.ClearedProofs {
+			path, err := a.proofPath(ref.TaskID, ref.UserID)
+			if err != nil {
+				continue
+			}
+			_ = os.Remove(path)
+		}
+		if len(result.ClearedProofs) > 0 {
+			_ = os.Remove(filepath.Join(a.Config.UploadDir, fmt.Sprintf("%d.jpg", id)))
+		}
+		httpx.WriteOK(w, http.StatusOK, result.Task)
+		return
+	}
+	if req.ProductID == nil || *req.ProductID <= 0 {
 		httpx.WriteError(w, http.StatusBadRequest, "BAD_INPUT", "請選擇產品")
 		return
 	}
-	task, err := a.Store.SetTaskProduct(r.Context(), id, req.ProductID, user.ID, time.Now())
+	task, err := a.Store.SetTaskProduct(r.Context(), id, *req.ProductID, user.ID, time.Now())
 	if err != nil {
 		writeStoreErr(w, err)
 		return

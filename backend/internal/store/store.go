@@ -50,19 +50,28 @@ type Category struct {
 }
 
 type Task struct {
-	ID            int64     `json:"id"`
-	Code          string    `json:"code"`
-	URL           string    `json:"url"`
-	ProductText   string    `json:"productText"`
-	ProductID     *int64    `json:"productId"`
-	ReplyText     string    `json:"replyText"`
-	Status        string    `json:"status"`
-	CreatedBy     string    `json:"createdBy"`
-	CreatedByName string    `json:"createdByName"`
-	CreatedAt     time.Time `json:"createdAt"`
-	HasProof      bool      `json:"hasProof"`
-	Unmatched     bool      `json:"unmatched"`
-	Duplicate     bool      `json:"duplicate"`
+	ID             int64     `json:"id"`
+	Code           string    `json:"code"`
+	CodeYear       int       `json:"codeYear"`
+	CodeDate       time.Time `json:"codeDate"`
+	URL            string    `json:"url"`
+	ProductText    string    `json:"productText"`
+	ProductID      *int64    `json:"productId"`
+	ReplyText      string    `json:"replyText"`
+	Status         string    `json:"status"`
+	CreatedBy      string    `json:"createdBy"`
+	CreatedByName  string    `json:"createdByName"`
+	CreatedAt      time.Time `json:"createdAt"`
+	HasProof       bool      `json:"hasProof"`
+	NeedsReproof   bool      `json:"needsReproof"`
+	Unmatched      bool      `json:"unmatched"`
+	Duplicate      bool      `json:"duplicate"`
+	ProofsCleared  bool      `json:"proofsCleared,omitempty"`
+}
+
+type UpdateCodeResult struct {
+	Task          Task
+	ClearedProofs []ProofRef
 }
 
 type ReplyStat struct {
@@ -196,6 +205,49 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, "INSERT INTO app_meta (k, v) VALUES ('reply_split', '1')"); err != nil {
+			return err
+		}
+	}
+	var codeDateCol int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tasks' AND COLUMN_NAME = 'code_date'`).Scan(&codeDateCol); err != nil {
+		return err
+	}
+	if codeDateCol == 0 {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE tasks ADD COLUMN code_date DATE NULL"); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE tasks SET code_date = STR_TO_DATE(
+			  CONCAT(
+			    code_year, '-',
+			    LPAD(SUBSTRING_INDEX(code, '/', 1), 2, '0'), '-',
+			    LPAD(SUBSTRING_INDEX(SUBSTRING_INDEX(code, '-', 1), '/', -1), 2, '0')
+			  ),
+			  '%Y-%m-%d'
+			)
+			WHERE code REGEXP '^[0-9]{1,2}/[0-9]{1,2}-[0-9]+$'`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, "UPDATE tasks SET code_date = DATE(created_at) WHERE code_date IS NULL"); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE tasks MODIFY COLUMN code_date DATE NOT NULL"); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE tasks ADD KEY idx_tasks_code_date (code_date)"); err != nil {
+			return err
+		}
+	}
+	var needsReproofCol int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'task_replies' AND COLUMN_NAME = 'needs_reproof'`).Scan(&needsReproofCol); err != nil {
+		return err
+	}
+	if needsReproofCol == 0 {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE task_replies ADD COLUMN needs_reproof TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
 			return err
 		}
 	}
@@ -530,10 +582,15 @@ func (s *Store) Import(ctx context.Context, items []parse.Item, userID, name str
 			id := matched.ID
 			productID = &id
 		}
+		month, day, _, ok := parseCodeParts(code)
+		if !ok {
+			return nil, InputError{Msg: fmt.Sprintf("編號 %s 不正確", code)}
+		}
+		stamp := time.Date(codeYear, time.Month(month), day, 0, 0, 0, 0, now.Location())
 		res, err := tx.ExecContext(ctx, `
-			INSERT INTO tasks (code, code_year, threads_url, product_text, product_id, reply_text, status, created_by, created_by_name, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, '', 'pending', ?, ?, ?, ?)`,
-			code, codeYear, item.item.URL, productText, productID, userID, name, now, now)
+			INSERT INTO tasks (code, code_year, code_date, threads_url, product_text, product_id, reply_text, status, created_by, created_by_name, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, '', 'pending', ?, ?, ?, ?)`,
+			code, codeYear, stamp, item.item.URL, productText, productID, userID, name, now, now)
 		if err != nil {
 			if isDup(err) {
 				return nil, InputError{Msg: fmt.Sprintf("編號 %s 已經用過", code)}
@@ -547,6 +604,8 @@ func (s *Store) Import(ctx context.Context, items []parse.Item, userID, name str
 		out = append(out, Task{
 			ID:            id,
 			Code:          code,
+			CodeYear:      codeYear,
+			CodeDate:      stamp,
 			URL:           item.item.URL,
 			ProductText:   productText,
 			ProductID:     productID,
@@ -566,13 +625,14 @@ func (s *Store) Import(ctx context.Context, items []parse.Item, userID, name str
 
 func (s *Store) WeekTasks(ctx context.Context, start, end time.Time, userID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.id, t.code, t.threads_url, t.product_text, t.product_id,
+		SELECT t.id, t.code, t.code_year, t.code_date, t.threads_url, t.product_text, t.product_id,
 		       COALESCE(r.reply_text, ''), COALESCE(r.status, 'pending'),
-		       t.created_by, t.created_by_name, t.created_at, IF(p.task_id IS NULL, 0, 1)
+		       t.created_by, t.created_by_name, t.created_at, IF(p.task_id IS NULL, 0, 1),
+		       COALESCE(r.needs_reproof, 0)
 		FROM tasks t
 		LEFT JOIN task_replies r ON r.task_id = t.id AND r.user_id = ?
 		LEFT JOIN proofs p ON p.task_id = t.id AND p.user_id = ?
-		WHERE t.created_at >= ? AND t.created_at < ?`, userID, userID, start, end)
+		WHERE t.code_date >= ? AND t.code_date < ?`, userID, userID, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -595,41 +655,56 @@ func (s *Store) WeekTasks(ctx context.Context, start, end time.Time, userID stri
 	return tasks, nil
 }
 
-// sortTasksByCodeDate 依編號裡的日期排。結算篇章從 26 日到下月 25 日，
-// 所以 26 日以後的日期在前，1–25 日在後；同一天再依流水號。
+// sortTasksByCodeDate 依編號日期排，同一天再依流水號。
 func sortTasksByCodeDate(tasks []Task) {
 	sort.SliceStable(tasks, func(i, j int) bool {
-		ai, okI := codeDateKey(tasks[i].Code)
-		aj, okJ := codeDateKey(tasks[j].Code)
-		if okI != okJ {
-			return okI
-		}
-		if !okI {
+		di := tasks[i].CodeDate
+		dj := tasks[j].CodeDate
+		if di.IsZero() || dj.IsZero() {
+			ai, okI := codeSortKey(tasks[i].CodeYear, tasks[i].Code)
+			aj, okJ := codeSortKey(tasks[j].CodeYear, tasks[j].Code)
+			if okI != okJ {
+				return okI
+			}
+			if okI && ai != aj {
+				return ai < aj
+			}
 			if !tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
 				return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
 			}
 			return tasks[i].ID < tasks[j].ID
 		}
-		if ai != aj {
-			return ai < aj
+		if !di.Equal(dj) {
+			return di.Before(dj)
+		}
+		_, _, ni, okI := parseCodeParts(tasks[i].Code)
+		_, _, nj, okJ := parseCodeParts(tasks[j].Code)
+		if okI && okJ && ni != nj {
+			return ni < nj
 		}
 		return tasks[i].ID < tasks[j].ID
 	})
 }
 
-func codeDateKey(code string) (int, bool) {
-	var month, day, n int
+func codeSortKey(year int, code string) (int, bool) {
+	month, day, n, ok := parseCodeParts(code)
+	if !ok {
+		return 0, false
+	}
+	if year < 1 {
+		year = 0
+	}
+	return year*1_000_000 + month*10_000 + day*1_000 + n, true
+}
+
+func parseCodeParts(code string) (month, day, n int, ok bool) {
 	if _, err := fmt.Sscanf(code, "%d/%d-%d", &month, &day, &n); err != nil {
-		return 0, false
+		return 0, 0, 0, false
 	}
-	if month < 1 || month > 12 || day < 1 || day > 31 || n < 1 {
-		return 0, false
+	if month < 1 || month > 12 || day < 1 || day > 31 || n < 1 || n > 999 {
+		return 0, 0, 0, false
 	}
-	phase := 1
-	if day >= 26 {
-		phase = 0
-	}
-	return phase*10_000_000 + month*100_000 + day*1_000 + n, true
+	return month, day, n, true
 }
 
 func (s *Store) WeekReplyStats(ctx context.Context, start, end time.Time) ([]ReplyStat, error) {
@@ -637,7 +712,7 @@ func (s *Store) WeekReplyStats(ctx context.Context, start, end time.Time) ([]Rep
 		SELECT r.user_id, MAX(r.user_name), CAST(SUM(CASE WHEN r.status = 'submitted' THEN 1 ELSE 0 END) AS SIGNED)
 		FROM task_replies r
 		JOIN tasks t ON t.id = r.task_id
-		WHERE t.created_at >= ? AND t.created_at < ?
+		WHERE t.code_date >= ? AND t.code_date < ?
 		GROUP BY r.user_id
 		ORDER BY r.user_id`, start, end)
 	if err != nil {
@@ -726,11 +801,12 @@ func (s *Store) MarkSubmitted(ctx context.Context, taskID int64, userID, userNam
 		return Task{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO task_replies (task_id, user_id, user_name, reply_text, status, updated_at)
-		VALUES (?, ?, ?, '', 'submitted', ?) AS new
+		INSERT INTO task_replies (task_id, user_id, user_name, reply_text, status, needs_reproof, updated_at)
+		VALUES (?, ?, ?, '', 'submitted', 0, ?) AS new
 		ON DUPLICATE KEY UPDATE
 		  user_name = new.user_name,
 		  status = 'submitted',
+		  needs_reproof = 0,
 		  updated_at = new.updated_at`, taskID, userID, userName, now); err != nil {
 		return Task{}, err
 	}
@@ -749,6 +825,125 @@ func (s *Store) TaskCode(ctx context.Context, id int64) (string, error) {
 	var code string
 	err := s.db.QueryRowContext(ctx, "SELECT code FROM tasks WHERE id = ?", id).Scan(&code)
 	return code, err
+}
+
+func (s *Store) TaskCreatedBy(ctx context.Context, id int64) (string, error) {
+	var createdBy string
+	err := s.db.QueryRowContext(ctx, "SELECT created_by FROM tasks WHERE id = ?", id).Scan(&createdBy)
+	return createdBy, err
+}
+
+func (s *Store) UpdateTaskCode(ctx context.Context, taskID int64, year int, code string, viewerID string, now time.Time) (UpdateCodeResult, error) {
+	display, err := parse.NormalizeCode(code, year)
+	if err != nil {
+		var input parse.InputError
+		if errors.As(err, &input) {
+			return UpdateCodeResult{}, InputError{Msg: input.Msg}
+		}
+		return UpdateCodeResult{}, InputError{Msg: "編號不正確"}
+	}
+	month, day, serial, ok := parseCodeParts(display)
+	if !ok {
+		return UpdateCodeResult{}, InputError{Msg: "編號不正確"}
+	}
+	stamp := time.Date(year, time.Month(month), day, 0, 0, 0, 0, now.Location())
+	if stamp.Year() != year || int(stamp.Month()) != month || stamp.Day() != day {
+		return UpdateCodeResult{}, InputError{Msg: "編號裡的日期不存在"}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return UpdateCodeResult{}, err
+	}
+	defer tx.Rollback()
+
+	var curCode string
+	var curYear int
+	err = tx.QueryRowContext(ctx, "SELECT code, code_year FROM tasks WHERE id = ? FOR UPDATE", taskID).Scan(&curCode, &curYear)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UpdateCodeResult{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return UpdateCodeResult{}, err
+	}
+	if curCode == display && curYear == year {
+		task, err := s.taskByID(ctx, taskID, viewerID)
+		if err != nil {
+			return UpdateCodeResult{}, err
+		}
+		return UpdateCodeResult{Task: task}, nil
+	}
+
+	var other int64
+	err = tx.QueryRowContext(ctx, "SELECT id FROM tasks WHERE code_year = ? AND code = ? AND id <> ?", year, display, taskID).Scan(&other)
+	if err == nil {
+		return UpdateCodeResult{}, InputError{Msg: fmt.Sprintf("編號 %d年 %s 已經有任務在用", year, display)}
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return UpdateCodeResult{}, err
+	}
+
+	proofRows, err := tx.QueryContext(ctx, "SELECT task_id, user_id FROM proofs WHERE task_id = ?", taskID)
+	if err != nil {
+		return UpdateCodeResult{}, err
+	}
+	cleared := []ProofRef{}
+	for proofRows.Next() {
+		var ref ProofRef
+		if err := proofRows.Scan(&ref.TaskID, &ref.UserID); err != nil {
+			proofRows.Close()
+			return UpdateCodeResult{}, err
+		}
+		cleared = append(cleared, ref)
+	}
+	if err := proofRows.Err(); err != nil {
+		proofRows.Close()
+		return UpdateCodeResult{}, err
+	}
+	proofRows.Close()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tasks SET code = ?, code_year = ?, code_date = ?, updated_at = ?
+		WHERE id = ?`, display, year, stamp, now, taskID); err != nil {
+		if isDup(err) {
+			return UpdateCodeResult{}, InputError{Msg: fmt.Sprintf("編號 %d年 %s 已經有任務在用", year, display)}
+		}
+		return UpdateCodeResult{}, err
+	}
+
+	if len(cleared) > 0 {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM proofs WHERE task_id = ?", taskID); err != nil {
+			return UpdateCodeResult{}, err
+		}
+		for _, ref := range cleared {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO task_replies (task_id, user_id, user_name, reply_text, status, needs_reproof, updated_at)
+				VALUES (?, ?, '', '', 'pending', 1, ?) AS new
+				ON DUPLICATE KEY UPDATE
+				  needs_reproof = 1,
+				  status = CASE WHEN task_replies.reply_text <> '' THEN 'copied' ELSE 'pending' END,
+				  updated_at = new.updated_at`, taskID, ref.UserID, now); err != nil {
+				return UpdateCodeResult{}, err
+			}
+		}
+	}
+
+	today := now.Format("2006-01-02")
+	if stamp.Format("2006-01-02") == today {
+		if err := bumpAtLeast(ctx, tx, today, serial); err != nil {
+			return UpdateCodeResult{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return UpdateCodeResult{}, err
+	}
+	task, err := s.taskByID(ctx, taskID, viewerID)
+	if err != nil {
+		return UpdateCodeResult{}, err
+	}
+	task.ProofsCleared = len(cleared) > 0
+	return UpdateCodeResult{Task: task, ClearedProofs: cleared}, nil
 }
 
 func (s *Store) DeleteTask(ctx context.Context, id int64) error {
@@ -780,9 +975,10 @@ func (s *Store) requireTaskTx(ctx context.Context, q interface {
 
 func (s *Store) taskByID(ctx context.Context, id int64, userID string) (Task, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT t.id, t.code, t.threads_url, t.product_text, t.product_id,
+		SELECT t.id, t.code, t.code_year, t.code_date, t.threads_url, t.product_text, t.product_id,
 		       COALESCE(r.reply_text, ''), COALESCE(r.status, 'pending'),
-		       t.created_by, t.created_by_name, t.created_at, IF(p.task_id IS NULL, 0, 1)
+		       t.created_by, t.created_by_name, t.created_at, IF(p.task_id IS NULL, 0, 1),
+		       COALESCE(r.needs_reproof, 0)
 		FROM tasks t
 		LEFT JOIN task_replies r ON r.task_id = t.id AND r.user_id = ?
 		LEFT JOIN proofs p ON p.task_id = t.id AND p.user_id = ?
@@ -802,7 +998,11 @@ func scanTask(row scanner) (Task, error) {
 	var task Task
 	var productID sql.NullInt64
 	var has int
-	err := row.Scan(&task.ID, &task.Code, &task.URL, &task.ProductText, &productID, &task.ReplyText, &task.Status, &task.CreatedBy, &task.CreatedByName, &task.CreatedAt, &has)
+	var needs int
+	err := row.Scan(
+		&task.ID, &task.Code, &task.CodeYear, &task.CodeDate, &task.URL, &task.ProductText, &productID,
+		&task.ReplyText, &task.Status, &task.CreatedBy, &task.CreatedByName, &task.CreatedAt, &has, &needs,
+	)
 	if err != nil {
 		return Task{}, err
 	}
@@ -811,6 +1011,7 @@ func scanTask(row scanner) (Task, error) {
 		task.ProductID = &id
 	}
 	task.HasProof = has == 1
+	task.NeedsReproof = needs == 1
 	task.Unmatched = task.ProductText != "" && task.ProductID == nil
 	return task, nil
 }

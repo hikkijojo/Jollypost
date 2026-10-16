@@ -1,14 +1,20 @@
 package store
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSortTasksByCodeDate(t *testing.T) {
+	day := func(m, d int) time.Time {
+		return time.Date(2026, time.Month(m), d, 0, 0, 0, 0, time.UTC)
+	}
 	tasks := []Task{
-		{ID: 4, Code: "10/15-2"},
-		{ID: 1, Code: "10/11-12"},
-		{ID: 2, Code: "10/12-1"},
-		{ID: 3, Code: "10/11-3"},
-		{ID: 5, Code: "10/15-1"},
+		{ID: 4, Code: "10/15-2", CodeYear: 2026, CodeDate: day(10, 15)},
+		{ID: 1, Code: "10/11-12", CodeYear: 2026, CodeDate: day(10, 11)},
+		{ID: 2, Code: "10/12-1", CodeYear: 2026, CodeDate: day(10, 12)},
+		{ID: 3, Code: "10/11-3", CodeYear: 2026, CodeDate: day(10, 11)},
+		{ID: 5, Code: "10/15-1", CodeYear: 2026, CodeDate: day(10, 15)},
 	}
 	sortTasksByCodeDate(tasks)
 	got := codes(tasks)
@@ -20,10 +26,10 @@ func TestSortTasksByCodeDate(t *testing.T) {
 
 func TestSortTasksByCodeDateAcrossMonthBoundary(t *testing.T) {
 	tasks := []Task{
-		{ID: 1, Code: "1/3-1"},
-		{ID: 2, Code: "12/28-2"},
-		{ID: 3, Code: "1/1-4"},
-		{ID: 4, Code: "12/26-1"},
+		{ID: 1, Code: "1/3-1", CodeYear: 2026, CodeDate: time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)},
+		{ID: 2, Code: "12/28-2", CodeYear: 2025, CodeDate: time.Date(2025, 12, 28, 0, 0, 0, 0, time.UTC)},
+		{ID: 3, Code: "1/1-4", CodeYear: 2026, CodeDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: 4, Code: "12/26-1", CodeYear: 2025, CodeDate: time.Date(2025, 12, 26, 0, 0, 0, 0, time.UTC)},
 	}
 	sortTasksByCodeDate(tasks)
 	got := codes(tasks)
